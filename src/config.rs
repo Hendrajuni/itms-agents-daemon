@@ -4,9 +4,18 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub server: ServerConfig,
+    #[serde(default)]
+    pub device: DeviceConfig,
     pub tracker: TrackerConfig,
     pub storage: StorageConfig,
     pub logging: LoggingConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviceConfig {
+    pub override_ip: Option<String>,
+    pub override_mac: Option<String>,
+    pub override_hostname: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +71,7 @@ impl Default for AgentConfig {
                 batch_size: default_batch_size(),
                 request_timeout_secs: default_timeout(),
             },
+            device: DeviceConfig::default(),
             tracker: TrackerConfig {
                 window_sampling_secs: default_window_sampling(),
                 idle_threshold_secs: default_idle_threshold(),
@@ -86,8 +96,26 @@ impl AgentConfig {
 
     pub fn load_or_default() -> Self {
         // Cek path konfigurasi berurutan:
-        // 1. config/agent.toml (relative ke binary)
-        // 2. %PROGRAMDATA%\ITMS\agent.toml
+        // 1. Direktori yang sama atau subfolder 'config' di sebelah binary (.exe)
+        // 2. Relative path 'config/agent.toml'
+        // 3. %PROGRAMDATA%\ITMS\agent.toml
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(parent) = exe_path.parent() {
+                let exe_config = parent.join("config").join("agent.toml");
+                if exe_config.exists() {
+                    if let Ok(cfg) = Self::load_from_file(exe_config) {
+                        return cfg;
+                    }
+                }
+                let direct_config = parent.join("agent.toml");
+                if direct_config.exists() {
+                    if let Ok(cfg) = Self::load_from_file(direct_config) {
+                        return cfg;
+                    }
+                }
+            }
+        }
+
         let local_cfg = Path::new("config/agent.toml");
         if local_cfg.exists() {
             if let Ok(cfg) = Self::load_from_file(local_cfg) {

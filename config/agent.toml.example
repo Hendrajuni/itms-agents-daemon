@@ -28,3 +28,10 @@ max_db_size_mb = 50
 [logging]
 # Level log: trace, debug, info, warn, error
 level = "info"
+
+[device]
+# Opsional: Override IP, MAC, atau Hostname untuk simulasi / environment pengujian khusus
+# override_ip = "192.168.0.20"
+# override_mac = "F4:B5:20:32:30:D9"
+# override_hostname = "komputer-monitoring"
+

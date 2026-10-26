@@ -4,6 +4,8 @@ mod dns_etw;
 mod flusher;
 mod hardware;
 mod service;
+mod software;
+mod spec;
 mod storage;
 mod window_tracker;
 
@@ -101,9 +103,12 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
 
     let mut hardware = HardwareCollector::new();
     let identity = hardware.get_identity();
+    let effective_ip = cfg.device.override_ip.as_deref().unwrap_or(&identity.ip_address);
+    let effective_mac = cfg.device.override_mac.as_deref().unwrap_or(&identity.mac_address);
+    let effective_hostname = cfg.device.override_hostname.as_deref().unwrap_or(&identity.hostname);
     info!(
         "Identitas Endpoint: Hostname={}, IP={}, MAC={}, UUID={}",
-        identity.hostname, identity.ip_address, identity.mac_address, identity.machine_uuid
+        effective_hostname, effective_ip, effective_mac, identity.machine_uuid
     );
 
     // 1. Jalankan Foreground Window Tracker
@@ -121,12 +126,21 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
     });
 
     // 3. Jalankan HTTP Batch Flusher Loop
-    let flusher = TelemetryFlusher::new(cfg.server.clone(), storage.clone());
+    let flusher = TelemetryFlusher::new(cfg.server.clone(), cfg.device.clone(), storage.clone());
     let flusher_interval = Duration::from_secs(cfg.server.flusher_interval_secs);
     let stop_flusher = stop_signal.clone();
 
     let flusher_handle = tokio::spawn(async move {
         info!("Memulai HTTP Batch Flusher loop (interval: {:?})...", flusher_interval);
+
+        // Pengiriman awal (Initial Sync) 2 detik setelah start untuk registrasi inventaris
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if !stop_flusher.load(Ordering::Relaxed) {
+            if let Err(e) = flusher.flush_once(&mut hardware).await {
+                warn!("Initial Telemetry & Inventory Sync tertunda (akan dicoba lagi pada siklus berikutnya): {}", e);
+            }
+        }
+
         while !stop_flusher.load(Ordering::Relaxed) {
             tokio::time::sleep(flusher_interval).await;
             if stop_flusher.load(Ordering::Relaxed) {

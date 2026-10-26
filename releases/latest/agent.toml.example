@@ -1,0 +1,37 @@
+# ITMS Endpoint Agent Configuration Template
+# Salin file ini menjadi 'config/agent.toml' atau ke '%PROGRAMDATA%\ITMS\agent.toml'
+
+[server]
+# URL endpoint backend ITMS-Pro
+url = "https://itms.domain.com/network/api/telemetry/push/"
+# Token autentikasi agent (disesuaikan dengan Agent Key pada konfigurasi ITMS-Pro)
+agent_key = "sec-agent-token-xyz-123"
+# Interval pengiriman telemetri ke server (detik)
+flusher_interval_secs = 60
+# Ukuran batch maksimum per HTTP POST request
+batch_size = 100
+# Timeout HTTP request (detik)
+request_timeout_secs = 15
+
+[tracker]
+# Interval pengecekan active window (detik)
+window_sampling_secs = 3
+# Ambang batas waktu tidak ada input mouse/keyboard sebelum status idle diaktifkan (detik)
+idle_threshold_secs = 300
+
+[storage]
+# Path lokal database SQLite untuk offline queue buffer
+db_path = "C:\\ProgramData\\ITMS\\buffer\\telemetry_queue.db"
+# Batas maksimum ukuran database buffer (MB) sebelum dilakukan FIFO rolling
+max_db_size_mb = 50
+
+[logging]
+# Level log: trace, debug, info, warn, error
+level = "info"
+
+[device]
+# Opsional: Override IP, MAC, atau Hostname untuk simulasi / environment pengujian khusus
+# override_ip = "192.168.0.20"
+# override_mac = "F4:B5:20:32:30:D9"
+# override_hostname = "komputer-monitoring"
+
