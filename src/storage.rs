@@ -1,0 +1,161 @@
+use rusqlite::{params, Connection, Result};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use tracing::warn;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityRecord {
+    pub id: Option<i64>,
+    pub domain: String,
+    pub app_name: String,
+    pub category: String,
+    pub duration_seconds: u32,
+    pub total_bytes: u64,
+    pub source_type: String,
+    pub recorded_at: String,
+}
+
+pub struct TelemetryStorage {
+    db_path: PathBuf,
+    max_size_bytes: u64,
+}
+
+impl TelemetryStorage {
+    pub fn new<P: AsRef<Path>>(db_path: P, max_size_mb: u64) -> Result<Self, Box<dyn std::error::Error>> {
+        let path = db_path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
+        let storage = Self {
+            db_path: path,
+            max_size_bytes: max_size_mb * 1024 * 1024,
+        };
+
+        storage.init_tables()?;
+        Ok(storage)
+    }
+
+    fn get_connection(&self) -> Result<Connection> {
+        let conn = Connection::open(&self.db_path)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA busy_timeout = 5000;"
+        )?;
+        Ok(conn)
+    }
+
+    fn init_tables(&self) -> Result<()> {
+        let conn = self.get_connection()?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS activity_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT NOT NULL,
+                app_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                duration_seconds INTEGER NOT NULL,
+                total_bytes INTEGER NOT NULL DEFAULT 0,
+                source_type TEXT NOT NULL DEFAULT 'agent',
+                recorded_at TEXT NOT NULL,
+                synced INTEGER NOT NULL DEFAULT 0
+            );",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_activity_synced ON activity_queue (synced, id);",
+            [],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn insert_activity(&self, record: &ActivityRecord) -> Result<i64> {
+        self.enforce_fifo_capacity()?;
+
+        let conn = self.get_connection()?;
+        conn.execute(
+            "INSERT INTO activity_queue (domain, app_name, category, duration_seconds, total_bytes, source_type, recorded_at, synced)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0);",
+            params![
+                record.domain,
+                record.app_name,
+                record.category,
+                record.duration_seconds,
+                record.total_bytes,
+                record.source_type,
+                record.recorded_at,
+            ],
+        )?;
+
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_unsynced_batch(&self, limit: usize) -> Result<Vec<ActivityRecord>> {
+        let conn = self.get_connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, domain, app_name, category, duration_seconds, total_bytes, source_type, recorded_at
+             FROM activity_queue
+             WHERE synced = 0
+             ORDER BY id ASC
+             LIMIT ?1;",
+        )?;
+
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(ActivityRecord {
+                id: Some(row.get(0)?),
+                domain: row.get(1)?,
+                app_name: row.get(2)?,
+                category: row.get(3)?,
+                duration_seconds: row.get(4)?,
+                total_bytes: row.get(5)?,
+                source_type: row.get(6)?,
+                recorded_at: row.get(7)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    pub fn delete_or_mark_synced(&self, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.get_connection()?;
+        let tx = conn.transaction()?;
+
+        // Hapus langsung baris yang sudah terkirim agar ukuran database tetap hemat
+        for chunk in ids.chunks(50) {
+            let id_list: Vec<String> = chunk.iter().map(|id| id.to_string()).collect();
+            let sql = format!("DELETE FROM activity_queue WHERE id IN ({});", id_list.join(","));
+            tx.execute(&sql, [])?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn enforce_fifo_capacity(&self) -> Result<()> {
+        if let Ok(meta) = fs::metadata(&self.db_path) {
+            if meta.len() > self.max_size_bytes {
+                warn!("Ukuran database melampaui batas maksimum ({} MB). Menghapus 500 rekaman terlama.", self.max_size_bytes / (1024 * 1024));
+                let conn = self.get_connection()?;
+                conn.execute(
+                    "DELETE FROM activity_queue WHERE id IN (SELECT id FROM activity_queue ORDER BY id ASC LIMIT 500);",
+                    [],
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
