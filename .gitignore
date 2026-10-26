@@ -1,0 +1,31 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+cargo-timing.html
+
+# Local configuration & secrets (keep templates/examples tracked)
+config/agent.toml
+*.env
+*.env.local
+
+# Local runtime buffers & databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.log
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+
+# OS generated files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Folder .agents dan deployment sengaja TIDAK di-ignore
