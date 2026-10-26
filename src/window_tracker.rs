@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info};
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{CloseHandle, HWND};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
@@ -57,14 +60,28 @@ impl WindowTracker {
                 continue;
             }
 
-            // 2. Ambil window aktif saat ini
-            if let Some((title, _pid)) = Self::get_foreground_window_info() {
+            // 2. Ambil window aktif dan executable pemanggil
+            if let Some((title, _pid, exe_opt)) = Self::get_foreground_window_info() {
                 if title.trim().is_empty() {
                     continue;
                 }
 
-                let parsed_domain = Self::extract_domain_or_app(&title);
-                let classification = self.classifier.classify(&parsed_domain);
+                // 3. Klasifikasi: Jika desktop software (Excel, Slack, Code) langsung dipetakan.
+                // Jika browser, parsing judul tab ke domain dan kategori.
+                let classification = if let Some(ref exe) = exe_opt {
+                    if self.classifier.is_browser_process(exe) {
+                        let parsed_domain = Self::extract_domain_or_app(&title);
+                        self.classifier.classify(&parsed_domain)
+                    } else if let Some(app_class) = self.classifier.classify_by_exe(exe) {
+                        app_class
+                    } else {
+                        let parsed_domain = Self::extract_domain_or_app(&title);
+                        self.classifier.classify(&parsed_domain)
+                    }
+                } else {
+                    let parsed_domain = Self::extract_domain_or_app(&title);
+                    self.classifier.classify(&parsed_domain)
+                };
 
                 match current_active {
                     Some(ref mut active) if active.domain == classification.domain => {
@@ -151,8 +168,8 @@ impl WindowTracker {
         false
     }
 
-    /// Membaca judul window aktif dan Process ID melalui Win32 API
-    fn get_foreground_window_info() -> Option<(String, u32)> {
+    /// Membaca judul window aktif, Process ID, dan nama binary executable melalui Win32 API
+    fn get_foreground_window_info() -> Option<(String, u32, Option<String>)> {
         unsafe {
             let hwnd: HWND = GetForegroundWindow();
             if hwnd.0 == 0 as _ {
@@ -166,7 +183,33 @@ impl WindowTracker {
             let len = GetWindowTextW(hwnd, &mut buffer);
             if len > 0 {
                 let title = String::from_utf16_lossy(&buffer[..len as usize]);
-                return Some((title, pid));
+                let exe_name = Self::get_process_name_from_pid(pid);
+                return Some((title, pid, exe_name));
+            }
+        }
+        None
+    }
+
+    /// Mendapatkan nama executable (misal: "chrome.exe", "excel.exe") dari Process ID
+    fn get_process_name_from_pid(pid: u32) -> Option<String> {
+        unsafe {
+            if let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                let mut path_buf = [0u16; 1024];
+                let mut size = path_buf.len() as u32;
+                let res = QueryFullProcessImageNameW(
+                    handle,
+                    PROCESS_NAME_FORMAT(0),
+                    windows::core::PWSTR(path_buf.as_mut_ptr()),
+                    &mut size,
+                );
+                let _ = CloseHandle(handle);
+
+                if res.is_ok() && size > 0 {
+                    let full_path = String::from_utf16_lossy(&path_buf[..size as usize]);
+                    return std::path::Path::new(&full_path)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string().to_lowercase());
+                }
             }
         }
         None
@@ -191,41 +234,34 @@ impl WindowTracker {
             clean
         };
 
-        // Pemisahan berdasarkan delimiter umum judul tab browser: " - " atau " — "
-        let parts: Vec<&str> = clean.split(|c| c == '-' || c == '—' || c == '|').map(|s| s.trim()).collect();
-        if parts.is_empty() {
-            return clean.to_lowercase();
-        }
+        let lower = clean.to_lowercase();
 
-        // Ambil bagian pertama (nama konten / tab)
-        let first_part = parts[0].to_lowercase();
-
-        if first_part.contains("chatgpt") {
+        if lower.contains("chatgpt") {
             return "chatgpt.com".to_string();
         }
-        if first_part.contains("facebook") {
+        if lower.contains("facebook") {
             return "facebook.com".to_string();
         }
-        if first_part.contains("youtube") {
+        if lower.contains("youtube") {
             return "youtube.com".to_string();
         }
-        if first_part.contains("whatsapp") {
+        if lower.contains("whatsapp") {
             return "web.whatsapp.com".to_string();
         }
-        if first_part.contains("telegram") {
+        if lower.contains("telegram") {
             return "web.telegram.org".to_string();
         }
-        if first_part.contains("gmail") || first_part.contains("google mail") {
+        if lower.contains("gmail") || lower.contains("google mail") {
             return "mail.google.com".to_string();
         }
-        if first_part.contains("erp") || first_part.contains("sap") {
+        if lower.contains("erp") || lower.contains("sap") {
             return "erp.pmgcloud.my.id".to_string();
         }
-        if first_part.contains("github") {
+        if lower.contains("github") {
             return "github.com".to_string();
         }
 
-        // Jika judul memuat format domain langsung (misal "sub.domain.com")
+        // Jika judul memuat format domain langsung (misal "portal.kantor.com - Intranet")
         for word in clean.split_whitespace() {
             let w = word.to_lowercase();
             if w.contains('.') && !w.ends_with('.') && !w.starts_with('.') && w.len() > 3 {
@@ -233,6 +269,27 @@ impl WindowTracker {
             }
         }
 
-        first_part
+        // Pemisahan berdasarkan delimiter umum judul tab browser: " - " atau " — "
+        let parts: Vec<&str> = clean.split(|c| c == '-' || c == '—' || c == '|').map(|s| s.trim()).collect();
+        if !parts.is_empty() {
+            return parts[0].to_lowercase();
+        }
+
+        lower
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_domain_or_app() {
+        assert_eq!(WindowTracker::extract_domain_or_app("ChatGPT - Google Chrome"), "chatgpt.com");
+        assert_eq!(WindowTracker::extract_domain_or_app("(3) Facebook - Google Chrome"), "facebook.com");
+        assert_eq!(WindowTracker::extract_domain_or_app("YouTube - Personal - Microsoft Edge"), "youtube.com");
+        assert_eq!(WindowTracker::extract_domain_or_app("Inbox - user@gmail.com - Google Chrome"), "mail.google.com");
+        assert_eq!(WindowTracker::extract_domain_or_app("SAP GUI for Windows"), "erp.pmgcloud.my.id");
+        assert_eq!(WindowTracker::extract_domain_or_app("portal.kantor.com - Intranet"), "portal.kantor.com");
     }
 }

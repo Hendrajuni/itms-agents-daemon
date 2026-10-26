@@ -66,6 +66,106 @@ impl DomainClassifier {
         Self { known_domains: map }
     }
 
+    /// Klasifikasi berdasarkan nama file binary executable (PID Process Image Name)
+    pub fn classify_by_exe(&self, exe_name: &str) -> Option<DomainClassification> {
+        let clean = exe_name.trim().to_lowercase();
+        match clean.as_str() {
+            "code.exe" => Some(DomainClassification {
+                domain: "code.visualstudio.com".to_string(),
+                app_name: "Visual Studio Code".to_string(),
+                category: "work_productivity".to_string(),
+            }),
+            "excel.exe" => Some(DomainClassification {
+                domain: "microsoft.com".to_string(),
+                app_name: "Microsoft Excel".to_string(),
+                category: "work_productivity".to_string(),
+            }),
+            "winword.exe" => Some(DomainClassification {
+                domain: "microsoft.com".to_string(),
+                app_name: "Microsoft Word".to_string(),
+                category: "work_productivity".to_string(),
+            }),
+            "powerpnt.exe" => Some(DomainClassification {
+                domain: "microsoft.com".to_string(),
+                app_name: "Microsoft PowerPoint".to_string(),
+                category: "work_productivity".to_string(),
+            }),
+            "outlook.exe" => Some(DomainClassification {
+                domain: "outlook.office.com".to_string(),
+                app_name: "Microsoft Outlook".to_string(),
+                category: "work_productivity".to_string(),
+            }),
+            "slack.exe" => Some(DomainClassification {
+                domain: "slack.com".to_string(),
+                app_name: "Slack".to_string(),
+                category: "work_productivity".to_string(),
+            }),
+            "teams.exe" | "ms-teams.exe" => Some(DomainClassification {
+                domain: "teams.microsoft.com".to_string(),
+                app_name: "Microsoft Teams".to_string(),
+                category: "work_productivity".to_string(),
+            }),
+            "zoom.exe" => Some(DomainClassification {
+                domain: "zoom.us".to_string(),
+                app_name: "Zoom Meetings".to_string(),
+                category: "communication".to_string(),
+            }),
+            "discord.exe" => Some(DomainClassification {
+                domain: "discord.com".to_string(),
+                app_name: "Discord".to_string(),
+                category: "communication".to_string(),
+            }),
+            "spotify.exe" => Some(DomainClassification {
+                domain: "spotify.com".to_string(),
+                app_name: "Spotify".to_string(),
+                category: "entertainment".to_string(),
+            }),
+            "telegram.exe" => Some(DomainClassification {
+                domain: "telegram.org".to_string(),
+                app_name: "Telegram Desktop".to_string(),
+                category: "communication".to_string(),
+            }),
+            "whatsapp.exe" => Some(DomainClassification {
+                domain: "whatsapp.com".to_string(),
+                app_name: "WhatsApp Desktop".to_string(),
+                category: "communication".to_string(),
+            }),
+            "saplogon.exe" => Some(DomainClassification {
+                domain: "erp.pmgcloud.my.id".to_string(),
+                app_name: "SAP ERP".to_string(),
+                category: "work_productivity".to_string(),
+            }),
+            "postman.exe" => Some(DomainClassification {
+                domain: "postman.com".to_string(),
+                app_name: "Postman API".to_string(),
+                category: "work_productivity".to_string(),
+            }),
+            "dbeaver.exe" => Some(DomainClassification {
+                domain: "dbeaver.io".to_string(),
+                app_name: "DBeaver SQL".to_string(),
+                category: "work_productivity".to_string(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Apakah executable ini merupakan web browser (yang membutuhkan parsing title tab)
+    pub fn is_browser_process(&self, exe_name: &str) -> bool {
+        let clean = exe_name.trim().to_lowercase();
+        matches!(
+            clean.as_str(),
+            "chrome.exe"
+                | "msedge.exe"
+                | "firefox.exe"
+                | "brave.exe"
+                | "opera.exe"
+                | "opera_gx.exe"
+                | "vivaldi.exe"
+                | "arc.exe"
+                | "iexplore.exe"
+        )
+    }
+
     /// Normalisasi FQDN (strip trailing dot, lowercase, buang www.)
     pub fn normalize_domain(&self, raw: &str) -> String {
         let mut d = raw.trim().to_lowercase();
@@ -135,4 +235,40 @@ fn capitalize_domain(domain: &str) -> String {
         }
     }
     domain.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_domain_normalization_and_classification() {
+        let classifier = DomainClassifier::new();
+
+        let res = classifier.classify("www.chatgpt.com.");
+        assert_eq!(res.domain, "chatgpt.com");
+        assert_eq!(res.app_name, "ChatGPT AI");
+        assert_eq!(res.category, "work_productivity");
+
+        let res2 = classifier.classify("m.facebook.com:443");
+        assert_eq!(res2.domain, "m.facebook.com");
+        assert_eq!(res2.app_name, "Facebook");
+        assert_eq!(res2.category, "social");
+    }
+
+    #[test]
+    fn test_process_classification() {
+        let classifier = DomainClassifier::new();
+
+        assert!(classifier.is_browser_process("chrome.exe"));
+        assert!(classifier.is_browser_process("msedge.exe"));
+        assert!(!classifier.is_browser_process("code.exe"));
+
+        let code_res = classifier.classify_by_exe("code.exe").unwrap();
+        assert_eq!(code_res.app_name, "Visual Studio Code");
+        assert_eq!(code_res.category, "work_productivity");
+
+        let excel_res = classifier.classify_by_exe("excel.exe").unwrap();
+        assert_eq!(excel_res.app_name, "Microsoft Excel");
+    }
 }

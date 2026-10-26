@@ -159,3 +159,46 @@ impl TelemetryStorage {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn test_storage_insert_and_get_batch() {
+        let temp_dir = std::env::temp_dir().join(format!("itms_test_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        let db_file = temp_dir.join("test_queue.db");
+
+        let storage = TelemetryStorage::new(&db_file, 50).expect("Inisialisasi test storage gagal");
+
+        let record = ActivityRecord {
+            id: None,
+            domain: "erp.pmgcloud.my.id".to_string(),
+            app_name: "Internal SAP / ERP".to_string(),
+            category: "work_productivity".to_string(),
+            duration_seconds: 120,
+            total_bytes: 45000,
+            source_type: "agent".to_string(),
+            recorded_at: Utc::now().to_rfc3339(),
+        };
+
+        let row_id = storage.insert_activity(&record).expect("Insert gagal");
+        assert!(row_id > 0);
+
+        let batch = storage.get_unsynced_batch(10).expect("Get batch gagal");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].domain, "erp.pmgcloud.my.id");
+        assert_eq!(batch[0].duration_seconds, 120);
+
+        // Test delete / mark synced
+        let ids = vec![batch[0].id.unwrap()];
+        storage.delete_or_mark_synced(&ids).expect("Delete failed");
+
+        let batch_after = storage.get_unsynced_batch(10).expect("Get batch after failed");
+        assert_eq!(batch_after.len(), 0);
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}

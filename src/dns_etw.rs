@@ -4,15 +4,74 @@ use chrono::Utc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
+use windows::core::{GUID, PCWSTR, PWSTR};
+use windows::Win32::Foundation::WIN32_ERROR;
+use windows::Win32::System::Diagnostics::Etw::{
+    CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW,
+    CONTROLTRACE_HANDLE, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW,
+    EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
+    PROCESS_TRACE_MODE_REAL_TIME, WNODE_FLAG_TRACED_GUID,
+};
 
-#[allow(dead_code)]
+#[repr(C)]
+struct TracePropertiesBuffer {
+    properties: EVENT_TRACE_PROPERTIES,
+    session_name: [u16; 128],
+}
+
+unsafe impl Send for TracePropertiesBuffer {}
+unsafe impl Sync for TracePropertiesBuffer {}
+
 pub struct DnsEtwSniffer {
     classifier: DomainClassifier,
     storage: Arc<TelemetryStorage>,
 }
 
-#[allow(dead_code)]
+unsafe extern "system" fn etw_event_callback(record: *mut EVENT_RECORD) {
+    if record.is_null() {
+        return;
+    }
+    let rec = &*record;
+    if rec.EventHeader.EventDescriptor.Id != DnsEtwSniffer::EVENT_DNS_QUERY_COMPLETED {
+        return;
+    }
+
+    let pid = rec.EventHeader.ProcessId;
+    if rec.UserData.is_null() || rec.UserDataLength < 2 {
+        return;
+    }
+
+    if let Some(domain) = parse_dns_query_name(rec.UserData as *const u8, rec.UserDataLength as usize) {
+        if !rec.UserContext.is_null() {
+            let sniffer = &*(rec.UserContext as *const DnsEtwSniffer);
+            sniffer.handle_dns_event(&domain, pid);
+        }
+    }
+}
+
+pub fn parse_dns_query_name(user_data: *const u8, length: usize) -> Option<String> {
+    if user_data.is_null() || length < 2 {
+        return None;
+    }
+    let u16_ptr = user_data as *const u16;
+    let max_chars = length / 2;
+    let mut len = 0;
+    while len < max_chars && unsafe { *u16_ptr.add(len) } != 0 {
+        len += 1;
+    }
+    if len == 0 {
+        return None;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(u16_ptr, len) };
+    let raw = String::from_utf16_lossy(slice);
+    let trimmed = raw.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_lowercase())
+}
+
 impl DnsEtwSniffer {
     pub const PROVIDER_GUID: &'static str = "{1C950233-BE26-4226-90F9-C1E47214E7E8}";
     pub const EVENT_DNS_QUERY_COMPLETED: u16 = 3008;
@@ -26,17 +85,146 @@ impl DnsEtwSniffer {
 
     /// Menjalankan sniffer DNS ETW di background
     pub async fn run(&self, stop_signal: Arc<AtomicBool>) {
-        info!("Memulai Windows DNS Client ETW Engine (Provider GUID: {})...", Self::PROVIDER_GUID);
+        info!(
+            "Memulai Windows DNS Client ETW Engine (Provider GUID: {})...",
+            Self::PROVIDER_GUID
+        );
 
-        // ETW real-time session tracing pada Windows memerlukan akun Administrator / LocalSystem.
-        // Jika dijalankan pada akun non-elevated (mode tes/debug biasa), kita berikan logging peringatan
-        // dan worker tetap aktif dalam mode standby agar tidak menyebabkan crash.
-        while !stop_signal.load(Ordering::Relaxed) {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            // Background ETW processing loop
+        let session_name_wide: Vec<u16> = "ITMS_DNS_Client_Trace\0".encode_utf16().collect();
+        let prop_size = std::mem::size_of::<TracePropertiesBuffer>() as u32;
+
+        let mut prop_buf = TracePropertiesBuffer {
+            properties: unsafe { std::mem::zeroed() },
+            session_name: [0u16; 128],
+        };
+
+        prop_buf.properties.Wnode.BufferSize = prop_size;
+        prop_buf.properties.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+        prop_buf.properties.Wnode.ClientContext = 1;
+        prop_buf.properties.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+        prop_buf.properties.LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+
+        // Bersihkan sesi lama dengan nama yang sama jika ada sesi tertinggal
+        unsafe {
+            let _ = ControlTraceW(
+                CONTROLTRACE_HANDLE { Value: 0 },
+                PCWSTR(session_name_wide.as_ptr()),
+                &mut prop_buf.properties,
+                EVENT_TRACE_CONTROL_STOP,
+            );
         }
 
-        info!("Windows DNS Client ETW Engine dihentikan.");
+        // Reset buffer size setelah ControlTrace
+        prop_buf.properties.Wnode.BufferSize = prop_size;
+
+        let mut session_handle = CONTROLTRACE_HANDLE { Value: 0 };
+        let start_status = unsafe {
+            StartTraceW(
+                &mut session_handle,
+                PCWSTR(session_name_wide.as_ptr()),
+                &mut prop_buf.properties,
+            )
+        };
+
+        if start_status != WIN32_ERROR(0) {
+            warn!(
+                "ETW DNS Sniffer: StartTraceW gagal (Win32 Error: {:?}). Sesi ETW memerlukan hak Administrator atau LocalSystem.",
+                start_status
+            );
+            info!("Mode DNS Sniffer dialihkan ke standby loop non-intrusif.");
+
+            while !stop_signal.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+
+            info!("Windows DNS Client ETW Engine (standby) dihentikan.");
+            return;
+        }
+
+        info!("ETW Trace Session berhasil diaktifkan. Session Handle: {:?}", session_handle);
+
+        // Aktifkan Provider Microsoft-Windows-DNS-Client {1C950233-BE26-4226-90F9-C1E47214E7E8}
+        let dns_guid = GUID::from_values(
+            0x1C950233,
+            0xBE26,
+            0x4226,
+            [0x90, 0xF9, 0xC1, 0xE4, 0x72, 0x14, 0xE7, 0xE8],
+        );
+
+        let enable_status = unsafe {
+            EnableTraceEx2(
+                session_handle,
+                &dns_guid,
+                1, // EVENT_CONTROL_CODE_ENABLE_PROVIDER
+                4, // TRACE_LEVEL_INFORMATION
+                0,
+                0,
+                0,
+                None,
+            )
+        };
+
+        if enable_status != WIN32_ERROR(0) {
+            warn!("EnableTraceEx2 DNS-Client provider warning: {:?}", enable_status);
+        }
+
+        // Buka trace consumer real-time
+        let trace_handle = {
+            let mut logfile = EVENT_TRACE_LOGFILEW::default();
+            logfile.LoggerName = PWSTR(session_name_wide.as_ptr() as *mut u16);
+            logfile.Anonymous1.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
+            logfile.Anonymous2.EventRecordCallback = Some(etw_event_callback);
+            logfile.Context = self as *const DnsEtwSniffer as *mut std::ffi::c_void;
+
+            unsafe { OpenTraceW(&mut logfile) }
+        };
+
+        if trace_handle.Value == u64::MAX || trace_handle.Value == 0 {
+            warn!("OpenTraceW gagal membuka stream real-time. Menutup trace session.");
+            prop_buf.properties.Wnode.BufferSize = prop_size;
+            unsafe {
+                let _ = ControlTraceW(
+                    session_handle,
+                    PCWSTR(session_name_wide.as_ptr()),
+                    &mut prop_buf.properties,
+                    EVENT_TRACE_CONTROL_STOP,
+                );
+            }
+            return;
+        }
+
+        // ProcessTrace memblokir thread saat membaca event secara sinkron, jalankan di OS thread
+        let proc_thread = std::thread::spawn(move || {
+            let mut handles = [trace_handle];
+            unsafe {
+                let _ = ProcessTrace(&mut handles, None, None);
+            }
+        });
+
+        info!("ETW DNS Sniffer aktif memproses event real-time.");
+
+        // Loop monitoring hingga stop_signal diterima
+        while !stop_signal.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        info!("Menghentikan ETW DNS Sniffer dan melepaskan session...");
+        unsafe {
+            let _ = CloseTrace(trace_handle);
+        }
+        let _ = proc_thread.join();
+
+        prop_buf.properties.Wnode.BufferSize = prop_size;
+        unsafe {
+            let _ = ControlTraceW(
+                session_handle,
+                PCWSTR(session_name_wide.as_ptr()),
+                &mut prop_buf.properties,
+                EVENT_TRACE_CONTROL_STOP,
+            );
+        }
+
+        info!("Windows DNS Client ETW Engine berhasil dimatikan secara bersih.");
     }
 
     /// Menangani event query DNS yang berhasil ditangkap dari ETW
@@ -45,12 +233,23 @@ impl DnsEtwSniffer {
             return;
         }
 
-        // Filter noise: jangan rekam domain internal arpa atau multicast
-        if raw_domain.ends_with(".arpa") || raw_domain.ends_with(".local") || raw_domain.contains("_tcp") {
+        let lower = raw_domain.to_lowercase();
+
+        // Filter noise: jangan rekam domain internal arpa, multicast, local, atau internal DNS service
+        if lower.ends_with(".arpa")
+            || lower.ends_with(".local")
+            || lower.ends_with(".lan")
+            || lower.ends_with(".home")
+            || lower.ends_with(".corp")
+            || lower.contains("_tcp")
+            || lower.contains("_udp")
+            || lower.contains("_dns")
+            || lower.contains("wpad")
+        {
             return;
         }
 
-        let classification = self.classifier.classify(raw_domain);
+        let classification = self.classifier.classify(&lower);
 
         let record = ActivityRecord {
             id: None,
@@ -68,5 +267,21 @@ impl DnsEtwSniffer {
         } else {
             debug!("DNS Query terdeteksi: {} (PID: {})", raw_domain, pid);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_dns_query_name() {
+        let sample: Vec<u16> = "api.github.com.\0extra".encode_utf16().collect();
+        let name = parse_dns_query_name(sample.as_ptr() as *const u8, sample.len() * 2);
+        assert_eq!(name, Some("api.github.com".to_string()));
+
+        let empty: Vec<u16> = "\0".encode_utf16().collect();
+        let name_empty = parse_dns_query_name(empty.as_ptr() as *const u8, empty.len() * 2);
+        assert_eq!(name_empty, None);
     }
 }

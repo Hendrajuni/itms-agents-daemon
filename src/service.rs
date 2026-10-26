@@ -86,7 +86,7 @@ pub fn install_service() -> Result<(), Box<dyn std::error::Error>> {
     let exe_path = std::env::current_exe()?;
     let exe_str = exe_path.to_string_lossy();
 
-    let bin_path_arg = format!("binPath= \"{}\"", exe_str);
+    let bin_path_arg = format!("binPath= \"\"{}\" service\"", exe_str);
     let display_name_arg = format!("DisplayName= \"{}\"", SERVICE_DISPLAY_NAME);
 
     info!("Mendaftarkan service {}...", SERVICE_NAME);
