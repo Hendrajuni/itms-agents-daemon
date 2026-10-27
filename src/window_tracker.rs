@@ -1,9 +1,10 @@
 use crate::classifier::DomainClassifier;
 use crate::config::TrackerConfig;
 use crate::storage::{ActivityRecord, TelemetryStorage};
+use crate::traffic::TrafficAggregator;
 use chrono::Utc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error, info};
 use windows::Win32::Foundation::{CloseHandle, HWND};
@@ -19,6 +20,8 @@ pub struct WindowTracker {
     config: TrackerConfig,
     classifier: DomainClassifier,
     storage: Arc<TelemetryStorage>,
+    traffic_aggregator: TrafficAggregator,
+    active_browser_domain: Arc<RwLock<Option<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,11 +33,18 @@ struct ActiveSample {
 }
 
 impl WindowTracker {
-    pub fn new(config: TrackerConfig, storage: Arc<TelemetryStorage>) -> Self {
+    pub fn new(
+        config: TrackerConfig,
+        storage: Arc<TelemetryStorage>,
+        traffic_aggregator: TrafficAggregator,
+        active_browser_domain: Arc<RwLock<Option<String>>>,
+    ) -> Self {
         Self {
             config,
             classifier: DomainClassifier::new(),
             storage,
+            traffic_aggregator,
+            active_browser_domain,
         }
     }
 
@@ -54,6 +64,9 @@ impl WindowTracker {
             // 1. Cek apakah user sedang idle (mouse & keyboard tidak bergerak)
             if self.is_user_idle() {
                 debug!("User terdeteksi idle. Sampling durasi di-pause.");
+                if let Ok(mut lock) = self.active_browser_domain.write() {
+                    *lock = None;
+                }
                 if let Some(sample) = current_active.take() {
                     self.flush_sample_to_storage(sample);
                 }
@@ -68,20 +81,29 @@ impl WindowTracker {
 
                 // 3. Klasifikasi: Jika desktop software (Excel, Slack, Code) langsung dipetakan.
                 // Jika browser, parsing judul tab ke domain dan kategori.
-                let classification = if let Some(ref exe) = exe_opt {
+                let (classification, is_browser) = if let Some(ref exe) = exe_opt {
                     if self.classifier.is_browser_process(exe) {
                         let parsed_domain = Self::extract_domain_or_app(&title);
-                        self.classifier.classify(&parsed_domain)
+                        (self.classifier.classify(&parsed_domain), true)
                     } else if let Some(app_class) = self.classifier.classify_by_exe(exe) {
-                        app_class
+                        (app_class, false)
                     } else {
                         let parsed_domain = Self::extract_domain_or_app(&title);
-                        self.classifier.classify(&parsed_domain)
+                        (self.classifier.classify(&parsed_domain), false)
                     }
                 } else {
                     let parsed_domain = Self::extract_domain_or_app(&title);
-                    self.classifier.classify(&parsed_domain)
+                    (self.classifier.classify(&parsed_domain), false)
                 };
+
+                // Perbarui active_browser_domain secara real-time untuk korelasi TCPIP sniffer
+                if let Ok(mut lock) = self.active_browser_domain.write() {
+                    if is_browser {
+                        *lock = Some(classification.domain.clone());
+                    } else {
+                        *lock = None;
+                    }
+                }
 
                 match current_active {
                     Some(ref mut active) if active.domain == classification.domain => {
@@ -134,18 +156,21 @@ impl WindowTracker {
             return;
         }
 
+        // Ambil akumulasi delta byte yang terasosiasi dengan domain ini
+        let bytes = self.traffic_aggregator.drain_bytes_for_domain(&sample.domain);
+
         let record = ActivityRecord {
             id: None,
             domain: sample.domain,
             app_name: sample.app_name,
             category: sample.category,
             duration_seconds: sample.duration_seconds,
-            total_bytes: 0, // Diupdate oleh sniffer jika tersedia
+            total_bytes: bytes,
             source_type: "agent".to_string(),
             recorded_at: Utc::now().to_rfc3339(),
         };
 
-        if let Err(e) = self.storage.insert_activity(&record) {
+        if let Err(e) = self.storage.upsert_or_accumulate_activity(&record) {
             error!("Gagal menyimpan aktivitas ke SQLite: {}", e);
         }
     }

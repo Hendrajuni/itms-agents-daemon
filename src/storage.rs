@@ -96,6 +96,45 @@ impl TelemetryStorage {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Akumulasi durasi dan total byte secara atomik jika domain yang sama sudah ada di antrean
+    pub fn upsert_or_accumulate_activity(&self, record: &ActivityRecord) -> Result<()> {
+        self.enforce_fifo_capacity()?;
+
+        let conn = self.get_connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, duration_seconds, total_bytes FROM activity_queue WHERE domain = ?1 AND synced = 0 ORDER BY id DESC LIMIT 1;"
+        )?;
+
+        let existing: Option<(i64, u32, u64)> = stmt.query_row(params![record.domain], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        }).ok();
+
+        if let Some((id, existing_dur, existing_bytes)) = existing {
+            let new_dur = existing_dur.saturating_add(record.duration_seconds);
+            let new_bytes = existing_bytes.saturating_add(record.total_bytes);
+            conn.execute(
+                "UPDATE activity_queue SET duration_seconds = ?1, total_bytes = ?2 WHERE id = ?3;",
+                params![new_dur, new_bytes, id],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO activity_queue (domain, app_name, category, duration_seconds, total_bytes, source_type, recorded_at, synced)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0);",
+                params![
+                    record.domain,
+                    record.app_name,
+                    record.category,
+                    record.duration_seconds,
+                    record.total_bytes,
+                    record.source_type,
+                    record.recorded_at,
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
     pub fn get_unsynced_batch(&self, limit: usize) -> Result<Vec<ActivityRecord>> {
         let conn = self.get_connection()?;
         let mut stmt = conn.prepare(

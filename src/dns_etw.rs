@@ -1,6 +1,8 @@
 use crate::classifier::DomainClassifier;
 use crate::storage::{ActivityRecord, TelemetryStorage};
+use crate::traffic::DnsResolutionCache;
 use chrono::Utc;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +28,7 @@ unsafe impl Sync for TracePropertiesBuffer {}
 pub struct DnsEtwSniffer {
     classifier: DomainClassifier,
     storage: Arc<TelemetryStorage>,
+    dns_cache: DnsResolutionCache,
 }
 
 unsafe extern "system" fn etw_event_callback(record: *mut EVENT_RECORD) {
@@ -42,12 +45,54 @@ unsafe extern "system" fn etw_event_callback(record: *mut EVENT_RECORD) {
         return;
     }
 
-    if let Some(domain) = parse_dns_query_name(rec.UserData as *const u8, rec.UserDataLength as usize) {
+    let (domain_opt, ips) = parse_dns_query_and_ips(rec.UserData as *const u8, rec.UserDataLength as usize);
+    if let Some(domain) = domain_opt {
         if !rec.UserContext.is_null() {
             let sniffer = &*(rec.UserContext as *const DnsEtwSniffer);
-            sniffer.handle_dns_event(&domain, pid);
+            sniffer.handle_dns_event(&domain, pid, ips);
         }
     }
+}
+
+/// Mengekstrak domain FQDN dan daftar IP hasil resolusi dari UserData Event 3008
+pub fn parse_dns_query_and_ips(user_data: *const u8, length: usize) -> (Option<String>, Vec<IpAddr>) {
+    let domain = parse_dns_query_name(user_data, length);
+    let mut ips = Vec::new();
+
+    if user_data.is_null() || length < 4 {
+        return (domain, ips);
+    }
+
+    let max_u16 = length / 2;
+    let slice = unsafe { std::slice::from_raw_parts(user_data as *const u16, max_u16) };
+
+    // Bagi menjadi string-string UTF-16 yang dipisahkan oleh null terminator (\0)
+    let mut start = 0;
+    let mut string_idx = 0;
+    for i in 0..max_u16 {
+        if slice[i] == 0 {
+            if i > start {
+                let part = String::from_utf16_lossy(&slice[start..i]);
+                // String index 0 adalah QueryName (domain)
+                // String index 1 adalah ServerList (DNS nameserver IP, diabaikan)
+                // String index >= 2 adalah QueryResults (daftar IP tujuan hasil resolusi domain)
+                if string_idx >= 2 && (part.contains('.') || part.contains(':')) {
+                    for token in part.split(';') {
+                        let trimmed = token.trim();
+                        if let Ok(ip) = trimmed.parse::<IpAddr>() {
+                            if !ips.contains(&ip) {
+                                ips.push(ip);
+                            }
+                        }
+                    }
+                }
+                string_idx += 1;
+            }
+            start = i + 1;
+        }
+    }
+
+    (domain, ips)
 }
 
 pub fn parse_dns_query_name(user_data: *const u8, length: usize) -> Option<String> {
@@ -76,10 +121,11 @@ impl DnsEtwSniffer {
     pub const PROVIDER_GUID: &'static str = "{1C950233-BE26-4226-90F9-C1E47214E7E8}";
     pub const EVENT_DNS_QUERY_COMPLETED: u16 = 3008;
 
-    pub fn new(storage: Arc<TelemetryStorage>) -> Self {
+    pub fn new(storage: Arc<TelemetryStorage>, dns_cache: DnsResolutionCache) -> Self {
         Self {
             classifier: DomainClassifier::new(),
             storage,
+            dns_cache,
         }
     }
 
@@ -89,6 +135,13 @@ impl DnsEtwSniffer {
             "Memulai Windows DNS Client ETW Engine (Provider GUID: {})...",
             Self::PROVIDER_GUID
         );
+
+        // Pra-populasikan DNS Cache dari tabel cache sistem operasi Windows
+        let seed_cache = self.dns_cache.clone();
+        tokio::task::spawn_blocking(move || {
+            let classifier = DomainClassifier::new();
+            seed_from_system_dns_cache(&seed_cache, &classifier);
+        });
 
         let session_name_wide: Vec<u16> = "ITMS_DNS_Client_Trace\0".encode_utf16().collect();
         let prop_size = std::mem::size_of::<TracePropertiesBuffer>() as u32;
@@ -228,7 +281,7 @@ impl DnsEtwSniffer {
     }
 
     /// Menangani event query DNS yang berhasil ditangkap dari ETW
-    pub fn handle_dns_event(&self, raw_domain: &str, pid: u32) {
+    pub fn handle_dns_event(&self, raw_domain: &str, pid: u32, ips: Vec<IpAddr>) {
         if raw_domain.trim().is_empty() {
             return;
         }
@@ -251,6 +304,17 @@ impl DnsEtwSniffer {
 
         let classification = self.classifier.classify(&lower);
 
+        // Daftarkan seluruh IP hasil resolusi ke dalam In-Memory DNS Resolution Cache
+        for ip in &ips {
+            self.dns_cache.insert(
+                *ip,
+                classification.domain.clone(),
+                classification.app_name.clone(),
+                classification.category.clone(),
+                Some(1800), // TTL default 30 menit
+            );
+        }
+
         let record = ActivityRecord {
             id: None,
             domain: classification.domain,
@@ -265,7 +329,56 @@ impl DnsEtwSniffer {
         if let Err(e) = self.storage.insert_activity(&record) {
             error!("Gagal mencatat DNS event ke SQLite: {}", e);
         } else {
-            debug!("DNS Query terdeteksi: {} (PID: {})", raw_domain, pid);
+            debug!(
+                "DNS Query terdeteksi: {} (PID: {}, resolved IPs: {})",
+                raw_domain, pid, ips.len()
+            );
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DnsCacheEntryJson {
+    #[serde(rename = "Entry")]
+    entry: Option<String>,
+    #[serde(rename = "Data")]
+    data: Option<String>,
+}
+
+/// Mengambil tabel DNS cache aktif langsung dari sistem operasi Windows (Get-DnsClientCache)
+pub fn seed_from_system_dns_cache(dns_cache: &DnsResolutionCache, classifier: &DomainClassifier) {
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Get-DnsClientCache | Select-Object Entry, Data | ConvertTo-Json -Compress"])
+        .output();
+
+    if let Ok(out) = output {
+        if out.status.success() {
+            let json_str = String::from_utf8_lossy(&out.stdout);
+            let parsed_entries: Vec<DnsCacheEntryJson> = if let Ok(arr) = serde_json::from_str::<Vec<DnsCacheEntryJson>>(&json_str) {
+                arr
+            } else if let Ok(single) = serde_json::from_str::<DnsCacheEntryJson>(&json_str) {
+                vec![single]
+            } else {
+                Vec::new()
+            };
+
+            let mut count = 0;
+            for item in parsed_entries {
+                if let (Some(domain_raw), Some(ip_str)) = (item.entry, item.data) {
+                    if let Ok(ip) = ip_str.trim().parse::<IpAddr>() {
+                        let class = classifier.classify(&domain_raw);
+                        dns_cache.insert(
+                            ip,
+                            class.domain,
+                            class.app_name,
+                            class.category,
+                            Some(1800),
+                        );
+                        count += 1;
+                    }
+                }
+            }
+            info!("DNS Cache berhasil di-seed dari sistem operasi Windows ({} pemetaan IP aktif).", count);
         }
     }
 }
@@ -283,5 +396,17 @@ mod tests {
         let empty: Vec<u16> = "\0".encode_utf16().collect();
         let name_empty = parse_dns_query_name(empty.as_ptr() as *const u8, empty.len() * 2);
         assert_eq!(name_empty, None);
+    }
+
+    #[test]
+    fn test_parse_dns_query_and_ips() {
+        // Mock UserData layout: "youtube.com\0server\0142.250.190.46;142.250.190.47;\0"
+        let sample: Vec<u16> = "youtube.com\01.1.1.1\0142.250.190.46;142.250.190.47;\0".encode_utf16().collect();
+        let (domain, ips) = parse_dns_query_and_ips(sample.as_ptr() as *const u8, sample.len() * 2);
+
+        assert_eq!(domain, Some("youtube.com".to_string()));
+        assert_eq!(ips.len(), 2);
+        assert_eq!(ips[0], "142.250.190.46".parse::<IpAddr>().unwrap());
+        assert_eq!(ips[1], "142.250.190.47".parse::<IpAddr>().unwrap());
     }
 }

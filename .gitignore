@@ -31,3 +31,4 @@ Desktop.ini
 # AI Agent rules & deployment documentation
 .agents/
 deployment/
+graphify-out/

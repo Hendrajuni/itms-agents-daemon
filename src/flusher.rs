@@ -6,6 +6,7 @@ use crate::storage::TelemetryStorage;
 use chrono::Utc;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -38,12 +39,23 @@ pub struct TelemetryPayload {
     pub activities: Vec<TelemetryActivityItem>,
 }
 
+/// Struktur deserialisasi respons server ITMS (termasuk antrean perintah Two-Way Command Queue)
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerPushResponse {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub status: String,
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
 pub struct TelemetryFlusher {
     server_cfg: ServerConfig,
     device_cfg: DeviceConfig,
     storage: Arc<TelemetryStorage>,
     client: reqwest::Client,
     last_inventory_sync: Arc<Mutex<Option<Instant>>>,
+    force_full_sync: Arc<AtomicBool>,
 }
 
 impl TelemetryFlusher {
@@ -60,6 +72,7 @@ impl TelemetryFlusher {
             storage,
             client,
             last_inventory_sync: Arc::new(Mutex::new(None)),
+            force_full_sync: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -67,9 +80,10 @@ impl TelemetryFlusher {
     /// serta mengelola sinkronisasi penuh profil hardware & software inventory.
     pub async fn flush_once(&self, hardware: &mut HardwareCollector) -> Result<usize, Box<dyn std::error::Error>> {
         let mut sync_guard = self.last_inventory_sync.lock().await;
+        let is_forced = self.force_full_sync.swap(false, Ordering::SeqCst);
 
-        // Tentukan apakah perlu mengirimkan Full Inventory (saat start pertama kali atau interval 24 jam)
-        let should_full_sync = match *sync_guard {
+        // Tentukan apakah perlu mengirimkan Full Inventory (saat start pertama kali, jadwal 24 jam, atau dipicu on-demand TRIGGER_FULL_SCAN)
+        let should_full_sync = is_forced || match *sync_guard {
             None => true,
             Some(last) => last.elapsed() >= Duration::from_secs(24 * 3600),
         };
@@ -104,6 +118,7 @@ impl TelemetryFlusher {
         }
 
         let count = activities.len();
+        let total_sent_bytes: u64 = activities.iter().map(|a| a.total_bytes).sum();
         let effective_ip = self.device_cfg.override_ip.as_deref().unwrap_or(&identity.ip_address);
         let effective_mac = self.device_cfg.override_mac.as_deref().unwrap_or(&identity.mac_address);
         let effective_hostname = self.device_cfg.override_hostname.as_deref().unwrap_or(&identity.hostname);
@@ -159,6 +174,14 @@ impl TelemetryFlusher {
             let status_code = res.status().as_u16();
             let resp_text = res.text().await.unwrap_or_default();
 
+            // Two-Way Command Queue: Periksa instruksi dari server ITMS
+            if let Ok(server_resp) = serde_json::from_str::<ServerPushResponse>(&resp_text) {
+                if server_resp.command.as_deref() == Some("TRIGGER_FULL_SCAN") {
+                    info!("⚡ Menerima perintah TRIGGER_FULL_SCAN dari server ITMS! Menjadwalkan full audit scan...");
+                    self.force_full_sync.store(true, Ordering::SeqCst);
+                }
+            }
+
             if should_full_sync {
                 info!(
                     "Full Inventory Sync SUKSES terkirim (HTTP {}). Server respon: {}",
@@ -166,7 +189,14 @@ impl TelemetryFlusher {
                 );
                 *sync_guard = Some(Instant::now());
             } else {
-                info!("Batch {} telemetri sukses terkirim (HTTP {}).", count, status_code);
+                if total_sent_bytes > 0 {
+                    info!(
+                        "Batch {} telemetri sukses terkirim (HTTP {}). Total traffic terkirim: {} KB ({} MB)",
+                        count, status_code, total_sent_bytes / 1024, total_sent_bytes / (1024 * 1024)
+                    );
+                } else {
+                    info!("Batch {} telemetri sukses terkirim (HTTP {}).", count, status_code);
+                }
             }
 
             if !ids.is_empty() {
@@ -179,5 +209,23 @@ impl TelemetryFlusher {
             error!("Server menolak pengiriman telemetri (HTTP {}): {}", status, body);
             Err(format!("HTTP Error {}: {}", status, body).into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_server_push_response_command() {
+        let json_with_cmd = r#"{"status": "success", "is_full_inventory": false, "command": "TRIGGER_FULL_SCAN"}"#;
+        let parsed: ServerPushResponse = serde_json::from_str(json_with_cmd).unwrap();
+        assert_eq!(parsed.status, "success");
+        assert_eq!(parsed.command.as_deref(), Some("TRIGGER_FULL_SCAN"));
+
+        let json_without_cmd = r#"{"status": "success", "agent_telemetry_ingested": 5}"#;
+        let parsed2: ServerPushResponse = serde_json::from_str(json_without_cmd).unwrap();
+        assert_eq!(parsed2.status, "success");
+        assert_eq!(parsed2.command, None);
     }
 }

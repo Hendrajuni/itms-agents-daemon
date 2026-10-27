@@ -1,31 +1,37 @@
-# ITMS Endpoint Agent Daemon - Release v0.2.0 (Windows x86_64)
+# ITMS Endpoint Agent Daemon - Release v0.2.2 (Windows x86_64)
 
-> **Versi Rilis:** `v0.2.0`  
+> **Versi Rilis:** `v0.2.2`  
 > **Arsitektur:** Windows 64-bit (`x86_64-pc-windows-gnu`)  
 > **Target OS:** Windows 10 / Windows 11 / Windows Server 2016+  
 > **Bahasa:** Rust (Edition 2021)  
-> **Ukuran Binary:** ~3.17 MB (Single standalone executable, zero external DLL)
+> **Ukuran Binary:** ~3.21 MB (Single standalone executable, zero external DLL)
 
 ---
 
-## 🌟 Fitur Utama v0.2.0 (Enterprise Endpoint Edition)
+## 🌟 Fitur Utama v0.2.2 (Enterprise Endpoint Edition)
 
-1. **Active Window & Screen Time Tracker (`src/window_tracker.rs`):**
+1. **⚡ Two-Way Command Queue & On-Demand Audit (Baru di v0.2.2):**
+   * Menerima payload perintah `TRIGGER_FULL_SCAN` dari dashboard web ITMS-Pro (Django) saat admin mengklik tombol `[⚡ Sinkronkan]`.
+   * Langsung mengeksekusi pemindaian hardware & audit software seketika (*real-time*) pada siklus berikutnya tanpa menunggu interval 24 jam.
+2. **📊 Windows Native TCPIP Traffic Accounting Engine (v0.2.1+):**
+   * Mengukur volume data jaringan (download/upload byte) menggunakan kernel ETW provider `Microsoft-Windows-TCPIP` (Events 1074, 1073, 1170, 1169).
+   * Merekam byte fisik jaringan per proses dan per domain tanpa instalasi driver pihak ketiga (tanpa WinPcap / Npcap).
+3. **Active Window & Screen Time Tracker (`src/window_tracker.rs`):**
    * Pelacakan judul aplikasi dan tab browser yang sedang aktif secara presisi (*ground truth*).
    * Deteksi *User Idle State* (otomatis pause saat pengguna tidak aktif > 5 menit).
-2. **DNS Query Sniffer Engine (`src/dns_etw.rs`):**
+4. **DNS Query Sniffer Engine (`src/dns_etw.rs`):**
    * Konsumsi Event Tracing for Windows (ETW) provider `Microsoft-Windows-DNS-Client` (Event ID 3008).
    * Mengetahui domain web dan Process ID (PID) pemanggil bahkan saat pengguna memakai mode Incognito / DoH.
-3. **Hardware & OS Specification Extractor (`src/spec.rs` - Baru di v0.2.0):**
+5. **Hardware & OS Specification Extractor (`src/spec.rs`):**
    * Ekstraksi identitas perangkat: Pabrikan (Manufacturer), Model, dan Serial Number / Service Tag via SMBIOS BIOS.
    * Spesifikasi OS lengkap: Windows Edition, Display Version, Build Number, dan Arsitektur OS.
    * Spesifikasi Jeroan: Processor (CPU Model, Cores, Threads), Total RAM Fisik (MB/GB), GPU Display Adapter, dan rincian partisi drive storage (`C:`, `D:`, kapasitas total, dan free space).
-4. **Installed Software Inventory Audit Scanner (`src/software.rs` - Baru di v0.2.0):**
+6. **Installed Software Inventory Audit Scanner (`src/software.rs`):**
    * Audit seluruh aplikasi desktop yang terpasang di komputer pengguna melalui scanning Registry Windows (HKLM 64-bit, WOW6432Node, HKCU per-user).
    * Auto-purge & auto-sync dengan backend ITMS-Pro.
-5. **Offline SQLite Queue Buffer (`src/storage.rs`):**
+7. **Offline SQLite Queue Buffer (`src/storage.rs`):**
    * Penyimpanan lokal transaksional SQLite (`%PROGRAMDATA%\ITMS\buffer\telemetry_queue.db`) saat koneksi jaringan terputus (offline-first).
-6. **Keamanan & Kepatuhan Non-Intrusive:**
+8. **Keamanan & Kepatuhan Non-Intrusive:**
    * 100% patuh UU PDP & Windows Defender: Zero packet capture driver, zero DLL injection, no keylogger, no screen capture.
    * Penggunaan memori < 15 MB dan CPU idle < 0.1%.
 
@@ -33,8 +39,10 @@
 
 ## 📁 Struktur Berkas Rilis
 
-* **`itms-agents-daemon-v0.2.0-windows-x64.exe`** : Binary release dengan nama berversi lengkap untuk arsip GitHub Releases.
+* **`itms-agents-daemon-v0.2.2-windows-x64.exe`** : Binary release dengan nama berversi lengkap untuk arsip GitHub Releases.
 * **`itms-agents-daemon.exe`** : Binary release standar yang digunakan oleh Windows Service wrapper.
+* **`itms-agents-daemon-v0.2.2-windows-x64.zip`** : Paket arsip ZIP rilis v0.2.2.
+* **`itms-agents-daemon-latest-windows-x64.zip`** : Alias paket ZIP untuk automasi download rilis terbaru.
 * **`agent.toml.example`** : Template konfigurasi agent (URL backend ITMS-Pro, Agent Key, dll).
 * **`install-service.bat`** : Skrip batch 1-klik untuk mendaftarkan dan menyalakan agent sebagai Windows Background Service (`LocalSystem`).
 * **`uninstall-service.bat`** : Skrip batch untuk menghentikan dan mencabut Windows Service.
@@ -76,6 +84,6 @@
 
 Untuk memverifikasi keaslian berkas yang diunduh:
 ```powershell
-Get-FileHash itms-agents-daemon-v0.2.0-windows-x64.exe -Algorithm SHA256
+Get-FileHash itms-agents-daemon-v0.2.2-windows-x64.exe -Algorithm SHA256
 ```
 Cocokkan nilai hash dengan berkas `SHA256SUMS.txt`.

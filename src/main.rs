@@ -3,17 +3,22 @@ mod config;
 mod dns_etw;
 mod flusher;
 mod hardware;
+mod net_etw;
 mod service;
 mod software;
 mod spec;
 mod storage;
+pub mod traffic;
 mod window_tracker;
 
+use chrono::Utc;
 use config::AgentConfig;
 use dns_etw::DnsEtwSniffer;
 use flusher::TelemetryFlusher;
 use hardware::HardwareCollector;
-use storage::TelemetryStorage;
+use net_etw::NetEtwConsumer;
+use storage::{ActivityRecord, TelemetryStorage};
+use traffic::{DnsResolutionCache, TrafficAggregator};
 use window_tracker::WindowTracker;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,8 +92,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Menjalankan loop daemon utama (Window Tracker, DNS ETW, dan HTTP Flusher)
+/// Menjalankan loop daemon utama (Window Tracker, DNS ETW, TCPIP Traffic Engine, dan HTTP Flusher)
 pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
+    info!("=======================================================");
+    info!("  ITMS Endpoint Agent Daemon v{}", env!("CARGO_PKG_VERSION"));
+    info!("=======================================================");
     let cfg = AgentConfig::load_or_default();
     info!("Konfigurasi berhasil dimuat. Target server: {}", cfg.server.url);
 
@@ -111,21 +119,80 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
         effective_hostname, effective_ip, effective_mac, identity.machine_uuid
     );
 
-    // 1. Jalankan Foreground Window Tracker
-    let window_tracker = WindowTracker::new(cfg.tracker.clone(), storage.clone());
+    // Inisialisasi In-Memory DNS Cache & Traffic Aggregator
+    let dns_cache = DnsResolutionCache::new(10000, 1800); // 10.000 entri, TTL 30 menit
+    let traffic_aggregator = TrafficAggregator::new();
+    let active_browser_domain = Arc::new(std::sync::RwLock::new(None));
+
+    // 1. Jalankan Foreground Window Tracker (dengan korelasi real bytes)
+    let window_tracker = WindowTracker::new(
+        cfg.tracker.clone(),
+        storage.clone(),
+        traffic_aggregator.clone(),
+        active_browser_domain.clone(),
+    );
     let stop_tracker = stop_signal.clone();
     let tracker_handle = tokio::spawn(async move {
         window_tracker.run(stop_tracker).await;
     });
 
-    // 2. Jalankan DNS ETW Sniffer
-    let dns_sniffer = DnsEtwSniffer::new(storage.clone());
+    // 2. Jalankan DNS ETW Sniffer (dengan feeding IP resolusi ke DNS Cache)
+    let dns_sniffer = DnsEtwSniffer::new(storage.clone(), dns_cache.clone());
     let stop_dns = stop_signal.clone();
     let dns_handle = tokio::spawn(async move {
         dns_sniffer.run(stop_dns).await;
     });
 
-    // 3. Jalankan HTTP Batch Flusher Loop
+    // 3. Jalankan TCPIP & UDP Network Traffic Accounting Engine
+    let net_consumer = NetEtwConsumer::new(
+        dns_cache.clone(),
+        traffic_aggregator.clone(),
+        active_browser_domain.clone(),
+    );
+    let stop_net = stop_signal.clone();
+    let net_handle = tokio::spawn(async move {
+        net_consumer.run(stop_net).await;
+    });
+
+    // 4. Background Traffic Drain & DNS Cache Pruner Loop (setiap 10 detik)
+    let bg_aggregator = traffic_aggregator.clone();
+    let bg_storage = storage.clone();
+    let bg_dns_cache = dns_cache.clone();
+    let stop_bg = stop_signal.clone();
+    let bg_handle = tokio::spawn(async move {
+        let mut loop_count: u32 = 0;
+        while !stop_bg.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            if stop_bg.load(Ordering::Relaxed) {
+                break;
+            }
+
+            loop_count = loop_count.wrapping_add(1);
+
+            // Bersihkan DNS cache yang expired setiap 5 menit (30 iterasi x 10s)
+            if loop_count % 30 == 0 {
+                bg_dns_cache.prune_expired();
+            }
+
+            // Kuras traffic background yang tidak terafiliasi dengan window foreground
+            let deltas = bg_aggregator.drain_deltas();
+            for delta in deltas {
+                let record = ActivityRecord {
+                    id: None,
+                    domain: delta.domain,
+                    app_name: delta.app_name,
+                    category: delta.category,
+                    duration_seconds: 0, // background network activity
+                    total_bytes: delta.total_bytes,
+                    source_type: "agent".to_string(),
+                    recorded_at: Utc::now().to_rfc3339(),
+                };
+                let _ = bg_storage.upsert_or_accumulate_activity(&record);
+            }
+        }
+    });
+
+    // 5. Jalankan HTTP Batch Flusher Loop
     let flusher = TelemetryFlusher::new(cfg.server.clone(), cfg.device.clone(), storage.clone());
     let flusher_interval = Duration::from_secs(cfg.server.flusher_interval_secs);
     let stop_flusher = stop_signal.clone();
@@ -159,7 +226,7 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    info!("Menunggu worker tasks selesai menyimpan data...");
-    let _ = tokio::join!(tracker_handle, dns_handle, flusher_handle);
+    info!("Menunggu seluruh worker tasks selesai menyimpan data...");
+    let _ = tokio::join!(tracker_handle, dns_handle, net_handle, bg_handle, flusher_handle);
     info!("ITMS Endpoint Agent Daemon sukses dimatikan.");
 }

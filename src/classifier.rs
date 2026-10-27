@@ -184,9 +184,38 @@ impl DomainClassifier {
         d
     }
 
+    /// Memetakan domain CDN / media streaming ke domain canonical (misal *.googlevideo.com -> youtube.com)
+    pub fn get_canonical_domain(&self, domain: &str) -> String {
+        let clean = domain.trim().to_lowercase();
+        if clean.contains("googlevideo.com")
+            || clean.contains("ytimg.com")
+            || clean.contains("youtubei.googleapis.com")
+            || clean.ends_with("youtu.be")
+        {
+            return "youtube.com".to_string();
+        }
+        if clean.contains("fbcdn.net") {
+            return "facebook.com".to_string();
+        }
+        if clean.contains("cdninstagram.com") {
+            return "instagram.com".to_string();
+        }
+        if clean.contains("nflxvideo.net") || clean.contains("nflxext.com") || clean.contains("nflximg.net") {
+            return "netflix.com".to_string();
+        }
+        if clean.contains("tiktokcdn.com") || clean.contains("byteoversea.com") || clean.contains("ibytedtos.com") {
+            return "tiktok.com".to_string();
+        }
+        if clean.contains("whatsapp.net") {
+            return "whatsapp.com".to_string();
+        }
+        clean
+    }
+
     /// Klasifikasi domain menjadi DomainClassification (app_name & category)
     pub fn classify(&self, raw_domain: &str) -> DomainClassification {
-        let domain = self.normalize_domain(raw_domain);
+        let normalized = self.normalize_domain(raw_domain);
+        let domain = self.get_canonical_domain(&normalized);
 
         // 1. Cek exact match
         if let Some(&(app, cat)) = self.known_domains.get(domain.as_str()) {
@@ -254,6 +283,11 @@ mod tests {
         assert_eq!(res2.domain, "m.facebook.com");
         assert_eq!(res2.app_name, "Facebook");
         assert_eq!(res2.category, "social");
+
+        let cdn_res = classifier.classify("rr1---sn-h0je6nzy.googlevideo.com");
+        assert_eq!(cdn_res.domain, "youtube.com");
+        assert_eq!(cdn_res.app_name, "YouTube");
+        assert_eq!(cdn_res.category, "entertainment");
     }
 
     #[test]
