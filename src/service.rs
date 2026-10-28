@@ -86,19 +86,27 @@ pub fn install_service() -> Result<(), Box<dyn std::error::Error>> {
     let exe_path = std::env::current_exe()?;
     let exe_str = exe_path.to_string_lossy();
 
-    let bin_path_arg = format!("binPath= \"\"{}\" service\"", exe_str);
-    let display_name_arg = format!("DisplayName= \"{}\"", SERVICE_DISPLAY_NAME);
-
     info!("Mendaftarkan service {}...", SERVICE_NAME);
-    let output = std::process::Command::new("sc.exe")
-        .args(["create", SERVICE_NAME, &bin_path_arg, &display_name_arg, "start= auto"])
+    let cmd_str = format!(
+        "sc create {} binPath= \"\\\"{}\\\" service\" DisplayName= \"{}\" start= auto",
+        SERVICE_NAME, exe_str, SERVICE_DISPLAY_NAME
+    );
+
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/c", &cmd_str])
         .output()?;
 
-    println!("{}", String::from_utf8_lossy(&output.stdout));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!("{}", stdout);
+
+    if !output.status.success() || stdout.contains("FAILED") || stdout.contains("ERROR") {
+        return Err(format!("Gagal mendaftarkan service ke Windows SCM: {}", stdout).into());
+    }
 
     // Atur deskripsi service
-    let _ = std::process::Command::new("sc.exe")
-        .args(["description", SERVICE_NAME, SERVICE_DESCRIPTION])
+    let desc_cmd = format!("sc description {} \"{}\"", SERVICE_NAME, SERVICE_DESCRIPTION);
+    let _ = std::process::Command::new("cmd.exe")
+        .args(["/c", &desc_cmd])
         .output();
 
     Ok(())

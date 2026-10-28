@@ -1,7 +1,7 @@
 @echo off
 setlocal
 echo ==============================================================
-echo   ITMS Endpoint Agent Daemon v0.2.0 - Service Installer
+echo   ITMS Endpoint Agent Daemon v0.2.3 - Service Installer
 echo ==============================================================
 echo.
 
@@ -25,14 +25,15 @@ if not exist "%~dp0agent.toml" (
 )
 
 echo [INFO] Mendaftarkan ITMS Endpoint Agent ke Windows Service Control Manager...
-"%~dp0itms-agents-daemon.exe" install
+sc.exe create ITMSAgentService binPath= "\"%~dp0itms-agents-daemon.exe\" service" DisplayName= "ITMS Endpoint Telemetry Daemon" start= auto
 if %errorLevel% equ 0 (
+    sc.exe description ITMSAgentService "ITMS Windows Endpoint Agent for Application and DNS Telemetry Tracking" >nul
     echo.
     echo [SUCCESS] Windows Service 'ITMSAgentService' berhasil didaftarkan!
     echo.
     choice /M "Apakah Anda ingin langsung menyalakan service sekarang?"
     if %errorlevel% equ 1 (
-        "%~dp0itms-agents-daemon.exe" start
+        sc.exe start ITMSAgentService
     )
 ) else (
     echo.
