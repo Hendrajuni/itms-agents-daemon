@@ -1,3 +1,4 @@
+use crate::classifier::is_ignored_network_process_or_domain;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -158,6 +159,12 @@ impl TrafficAggregator {
             return;
         }
 
+        // Abaikan proses internal Windows (mpcmdrun.exe, svchost.exe, textinputhost.exe, dll.)
+        // dan proses yang gagal di-resolve namanya (pid_*.exe)
+        if is_ignored_network_process_or_domain(domain) || is_ignored_network_process_or_domain(app_name) {
+            return;
+        }
+
         let entry = {
             let read_lock = self.buckets.read().unwrap();
             if let Some(existing) = read_lock.get(domain) {
@@ -198,7 +205,7 @@ impl TrafficAggregator {
                 let recv = entry.bytes_received.swap(0, Ordering::Relaxed);
                 let total = sent.saturating_add(recv);
 
-                if total > 0 {
+                if total > 0 && !is_ignored_network_process_or_domain(&entry.domain) && !is_ignored_network_process_or_domain(&entry.app_name) {
                     deltas.push(DomainTrafficDelta {
                         domain: entry.domain.clone(),
                         app_name: entry.app_name.clone(),
@@ -215,6 +222,10 @@ impl TrafficAggregator {
 
     /// Mengambil dan menguras total byte untuk domain tertentu (digunakan oleh WindowTracker saat flush)
     pub fn drain_bytes_for_domain(&self, domain: &str) -> u64 {
+        if is_ignored_network_process_or_domain(domain) {
+            return 0;
+        }
+
         if let Ok(lock) = self.buckets.read() {
             if let Some(entry) = lock.get(domain) {
                 let sent = entry.bytes_sent.swap(0, Ordering::Relaxed);
@@ -293,6 +304,26 @@ mod tests {
         // Setelah drain, nilai ter-reset ke 0
         let drained_again = agg.drain_deltas();
         assert_eq!(drained_again.len(), 0);
+    }
+
+    #[test]
+    fn test_traffic_aggregator_ignores_internal_and_unresolved_processes() {
+        let agg = TrafficAggregator::new();
+
+        // Coba rekam traffic untuk proses internal Windows dan unresolved PID
+        agg.record_traffic("mpcmdrun.exe", "mpcmdrun.exe", "general_network", 1000, 2000);
+        agg.record_traffic("svchost.exe", "svchost.exe", "general_network", 5000, 10000);
+        agg.record_traffic("textinputhost.exe", "textinputhost.exe", "general_network", 300, 400);
+        agg.record_traffic("pid_8420.exe", "pid_8420.exe", "general_network", 800, 1200);
+        agg.record_traffic("system.local", "System Network Services", "system", 999, 999);
+
+        // Rekam traffic aplikasi valid
+        agg.record_traffic("code.visualstudio.com", "Visual Studio Code", "work_productivity", 400, 600);
+
+        let deltas = agg.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].domain, "code.visualstudio.com");
+        assert_eq!(deltas[0].total_bytes, 1000);
     }
 
     #[test]

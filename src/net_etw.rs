@@ -1,4 +1,6 @@
-use crate::classifier::DomainClassifier;
+use crate::classifier::{
+    is_ignored_network_process_or_domain, is_windows_internal_process, DomainClassifier,
+};
 use crate::traffic::{is_internal_or_noise_ip, DnsResolutionCache, TrafficAggregator};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -27,12 +29,24 @@ struct TracePropertiesBuffer {
 unsafe impl Send for TracePropertiesBuffer {}
 unsafe impl Sync for TracePropertiesBuffer {}
 
+#[derive(Debug, Clone)]
+pub enum ProcessIdentity {
+    InternalWindows,
+    Unresolved,
+    Browser(String),
+    App {
+        domain: String,
+        app_name: String,
+        category: String,
+    },
+}
+
 pub struct NetEtwConsumer {
     dns_cache: DnsResolutionCache,
     traffic_aggregator: TrafficAggregator,
     active_browser_domain: Arc<RwLock<Option<String>>>,
     classifier: DomainClassifier,
-    pid_cache: Arc<Mutex<HashMap<u32, (String, String, String)>>>,
+    pid_cache: Arc<Mutex<HashMap<u32, ProcessIdentity>>>,
 }
 
 unsafe extern "system" fn tcpip_event_callback(record: *mut EVENT_RECORD) {
@@ -351,6 +365,17 @@ impl NetEtwConsumer {
 
     /// Korelasi paket transfer ke domain web atau proses aplikasi
     pub fn handle_packet_transfer(&self, pid: u32, dest_ip_opt: Option<IpAddr>, send_bytes: u64, recv_bytes: u64) {
+        if pid == 0 || pid == 4 {
+            return;
+        }
+
+        let proc_ident = self.get_or_resolve_process(pid);
+
+        // Abaikan koneksi dari proses internal Windows (mpcmdrun.exe, svchost.exe, textinputhost.exe, dll.)
+        if matches!(proc_ident, ProcessIdentity::InternalWindows) {
+            return;
+        }
+
         // 1. Cek apakah DestIP ada di DNS Resolution Cache
         if let Some(ref dest_ip) = dest_ip_opt {
             if is_internal_or_noise_ip(dest_ip) {
@@ -371,39 +396,55 @@ impl NetEtwConsumer {
         // 2. Fallback: IP tidak ada di DNS (direct IP / persistent connection / pre-cached)
         // Jika proses pengirim/penerima adalah web browser (msedge, chrome, firefox, dll)
         // dan ada tab browser yang sedang aktif di foreground, atribusikan langsung ke tab tersebut!
-        if let Some(exe) = Self::get_process_name(pid) {
-            if self.classifier.is_browser_process(&exe) {
-                if let Ok(lock) = self.active_browser_domain.read() {
-                    if let Some(ref active_domain) = *lock {
-                        let class = self.classifier.classify(active_domain);
-                        self.traffic_aggregator.record_traffic(
-                            &class.domain,
-                            &class.app_name,
-                            &class.category,
-                            send_bytes,
-                            recv_bytes,
-                        );
-                        return;
-                    }
+        if matches!(proc_ident, ProcessIdentity::Browser(_)) {
+            if let Ok(lock) = self.active_browser_domain.read() {
+                if let Some(ref active_domain) = *lock {
+                    let class = self.classifier.classify(active_domain);
+                    self.traffic_aggregator.record_traffic(
+                        &class.domain,
+                        &class.app_name,
+                        &class.category,
+                        send_bytes,
+                        recv_bytes,
+                    );
+                    return;
                 }
             }
         }
 
         // 3. Fallback: Petakan ke nama proses (PID)
-        let (domain, app_name, category) = self.resolve_pid_to_app(pid);
-        self.traffic_aggregator.record_traffic(
-            &domain,
-            &app_name,
-            &category,
-            send_bytes,
-            recv_bytes,
-        );
+        // JANGAN kirim / rekam jika proses gagal di-resolve namanya (pid_*.exe) atau internal Windows
+        match proc_ident {
+            ProcessIdentity::App { domain, app_name, category } => {
+                if !is_ignored_network_process_or_domain(&domain) {
+                    self.traffic_aggregator.record_traffic(
+                        &domain,
+                        &app_name,
+                        &category,
+                        send_bytes,
+                        recv_bytes,
+                    );
+                }
+            }
+            ProcessIdentity::Browser(exe) => {
+                self.traffic_aggregator.record_traffic(
+                    &exe,
+                    &exe,
+                    "web_browser",
+                    send_bytes,
+                    recv_bytes,
+                );
+            }
+            ProcessIdentity::Unresolved | ProcessIdentity::InternalWindows => {
+                // Jangan rekam proses yang gagal di-resolve namanya (pid_*.exe) atau internal Windows
+            }
+        }
     }
 
-    /// Resolusi Process ID ke Nama Aplikasi / Domain fallback
-    fn resolve_pid_to_app(&self, pid: u32) -> (String, String, String) {
+    /// Mengambil atau me-resolve identitas proses dari PID (dengan cache in-memory)
+    pub fn get_or_resolve_process(&self, pid: u32) -> ProcessIdentity {
         if pid == 0 || pid == 4 {
-            return ("system.local".to_string(), "System Network Services".to_string(), "system".to_string());
+            return ProcessIdentity::InternalWindows;
         }
 
         if let Ok(lock) = self.pid_cache.lock() {
@@ -412,23 +453,47 @@ impl NetEtwConsumer {
             }
         }
 
-        let exe_opt = Self::get_process_name(pid);
-        let exe = exe_opt.unwrap_or_else(|| format!("pid_{}.exe", pid));
-
-        let classification = if let Some(app_class) = self.classifier.classify_by_exe(&exe) {
-            (app_class.domain, app_class.app_name, app_class.category)
-        } else {
-            (exe.clone(), exe.clone(), "general_network".to_string())
+        let identity = match Self::get_process_name(pid) {
+            None => ProcessIdentity::Unresolved,
+            Some(exe) => {
+                if is_windows_internal_process(&exe) {
+                    ProcessIdentity::InternalWindows
+                } else if self.classifier.is_browser_process(&exe) {
+                    ProcessIdentity::Browser(exe)
+                } else if let Some(app_class) = self.classifier.classify_by_exe(&exe) {
+                    ProcessIdentity::App {
+                        domain: app_class.domain,
+                        app_name: app_class.app_name,
+                        category: app_class.category,
+                    }
+                } else {
+                    ProcessIdentity::App {
+                        domain: exe.clone(),
+                        app_name: exe,
+                        category: "general_network".to_string(),
+                    }
+                }
+            }
         };
 
         if let Ok(mut lock) = self.pid_cache.lock() {
             if lock.len() >= 512 {
                 lock.clear();
             }
-            lock.insert(pid, classification.clone());
+            lock.insert(pid, identity.clone());
         }
 
-        classification
+        identity
+    }
+
+    /// Resolusi Process ID ke Nama Aplikasi / Domain fallback (mengabaikan internal & unresolved)
+    #[allow(dead_code)]
+    pub fn resolve_pid_to_app(&self, pid: u32) -> Option<(String, String, String)> {
+        match self.get_or_resolve_process(pid) {
+            ProcessIdentity::App { domain, app_name, category } => Some((domain, app_name, category)),
+            ProcessIdentity::Browser(exe) => Some((exe.clone(), exe, "web_browser".to_string())),
+            ProcessIdentity::InternalWindows | ProcessIdentity::Unresolved => None,
+        }
     }
 
     fn get_process_name(pid: u32) -> Option<String> {
@@ -490,5 +555,40 @@ mod tests {
         let (tcp_ip_opt, tcp_size) = res_tcp.unwrap();
         assert_eq!(tcp_ip_opt, None);
         assert_eq!(tcp_size, 1460);
+    }
+
+    #[test]
+    fn test_handle_packet_transfer_ignores_internal_and_unresolved() {
+        let dns_cache = DnsResolutionCache::new(100, 60);
+        let traffic_aggregator = TrafficAggregator::new();
+        let active_browser = Arc::new(RwLock::new(None));
+        let consumer = NetEtwConsumer::new(dns_cache, traffic_aggregator.clone(), active_browser);
+
+        // Pre-populasikan pid_cache dengan mock ProcessIdentity
+        if let Ok(mut lock) = consumer.pid_cache.lock() {
+            lock.insert(100, ProcessIdentity::InternalWindows); // mpcmdrun.exe
+            lock.insert(200, ProcessIdentity::InternalWindows); // svchost.exe
+            lock.insert(300, ProcessIdentity::InternalWindows); // textinputhost.exe
+            lock.insert(400, ProcessIdentity::Unresolved);        // PID gagal di-resolve (pid_*.exe)
+            lock.insert(500, ProcessIdentity::App {
+                domain: "code.visualstudio.com".to_string(),
+                app_name: "Visual Studio Code".to_string(),
+                category: "work_productivity".to_string(),
+            });
+        }
+
+        // Simulasi pengiriman paket
+        consumer.handle_packet_transfer(0, None, 1000, 1000);   // PID 0 (system kernel)
+        consumer.handle_packet_transfer(4, None, 1000, 1000);   // PID 4 (system)
+        consumer.handle_packet_transfer(100, None, 5000, 5000); // mpcmdrun.exe
+        consumer.handle_packet_transfer(200, None, 5000, 5000); // svchost.exe
+        consumer.handle_packet_transfer(300, None, 5000, 5000); // textinputhost.exe
+        consumer.handle_packet_transfer(400, None, 5000, 5000); // unresolved PID
+        consumer.handle_packet_transfer(500, None, 200, 800);   // Visual Studio Code (valid)
+
+        let deltas = traffic_aggregator.drain_deltas();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].domain, "code.visualstudio.com");
+        assert_eq!(deltas[0].total_bytes, 1000);
     }
 }

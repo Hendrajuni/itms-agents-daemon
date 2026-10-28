@@ -1,3 +1,4 @@
+use crate::classifier::is_ignored_network_process_or_domain;
 use crate::config::{DeviceConfig, ServerConfig};
 use crate::hardware::{HardwareCollector, SystemMetrics};
 use crate::software::{InstalledApp, SoftwareScanner};
@@ -104,6 +105,16 @@ impl TelemetryFlusher {
         let mut activities = Vec::new();
 
         for item in unsynced {
+            // Abaikan proses internal Windows atau proses yang gagal di-resolve namanya (pid_*.exe)
+            if is_ignored_network_process_or_domain(&item.domain)
+                || is_ignored_network_process_or_domain(&item.app_name)
+            {
+                if let Some(id) = item.id {
+                    ids.push(id); // Tandai agar dibersihkan dari antrean lokal SQLite
+                }
+                continue; // JANGAN kirim ke server ITMS
+            }
+
             if let Some(id) = item.id {
                 ids.push(id);
             }
@@ -115,6 +126,16 @@ impl TelemetryFlusher {
                 total_bytes: item.total_bytes,
                 source_type: item.source_type,
             });
+        }
+
+        // Jika semua entri unsynced adalah proses internal yang diabaikan dan tidak sedang full sync
+        if activities.is_empty() && !should_full_sync {
+            if !ids.is_empty() {
+                self.storage.delete_or_mark_synced(&ids)?;
+                debug!("Dibersihkan {} entri proses internal/unresolved dari antrean SQLite.", ids.len());
+            }
+            debug!("Tidak ada data telemetri valid yang perlu di-flush.");
+            return Ok(0);
         }
 
         let count = activities.len();

@@ -2,7 +2,7 @@
 
 [![Rust Version](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org/)
 [![Target Platform](https://img.shields.io/badge/platform-Windows%20x86__64-blue.svg)](https://microsoft.com/windows)
-[![Release Version](https://img.shields.io/badge/release-v0.2.2-brightgreen.svg)](releases/v0.2.2/)
+[![Release Version](https://img.shields.io/badge/release-v0.2.3-brightgreen.svg)](releases/v0.2.3/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **ITMS Endpoint Agent Daemon** adalah background service Windows mandiri (*standalone single executable*) berbasis **Rust** yang dirancang untuk mengumpulkan telemetri aktivitas aplikasi, domain web, volume trafik data jaringan riil, spesifikasi perangkat keras, dan audit inventaris software secara 100% presisi (*ground truth*), lalu menyinkronkannya ke server pusat **ITMS-Pro** (Django).
@@ -11,6 +11,7 @@
 
 ## 🌟 Fitur Utama
 
+* **🛡️ Windows Internal Process Filtering & Noise Suppression (v0.2.3):** Mengabaikan koneksi proses sistem Windows internal (`mpcmdrun.exe`, `svchost.exe`, `textinputhost.exe`, `msmpeng.exe`, `searchhost.exe`, `smartscreen.exe`, PID 0, PID 4, dll.) dan mencegah pengiriman proses yang gagal di-resolve namanya (`pid_*.exe`), menjaga database ITMS-Pro tetap bersih.
 * **⚡ Two-Way Command Queue & On-Demand Audit (v0.2.2):** Menerima instruksi instan `TRIGGER_FULL_SCAN` dari dashboard web ITMS-Pro (Django) saat admin mengklik tombol `[⚡ Sinkronkan]`, langsung memicu audit hardware & inventaris software secara *real-time* tanpa menunggu siklus 24 jam.
 * **📊 Windows Native TCPIP Traffic Accounting Engine (v0.2.1+):** Menangkap byte riil TCP/UDP data transfer via kernel Windows *Event Tracing for Windows* (ETW Provider: `Microsoft-Windows-TCPIP`) tanpa driver pihak ketiga (*zero Npcap/WinPcap*), mengagregasikan volume traffic fisik per domain dan proses aplikasi.
 * **🌐 Windows DNS ETW Sniffer Engine:** Menangkap query DNS via ETW (`Microsoft-Windows-DNS-Client`, Event ID 3008) beserta Process ID (PID) pemanggil, bahkan pada mode *Incognito* / *DoH*.
@@ -28,7 +29,7 @@
 ## 🚀 Panduan Instalasi Cepat
 
 ### 1. Unduh Berkas Rilis
-Unduh paket rilis terbaru di tab [**Releases**](https://github.com/Hendrajuni/itms-agents-daemon/releases/latest) atau gunakan folder [`releases/v0.2.2/`](releases/v0.2.2/).
+Unduh paket rilis terbaru di tab [**Releases**](https://github.com/Hendrajuni/itms-agents-daemon/releases/latest) atau gunakan folder [`releases/v0.2.3/`](releases/v0.2.3/).
 
 ### 2. Konfigurasi `agent.toml`
 Salin template `agent.toml.example` menjadi `agent.toml` pada folder instalasi:
@@ -73,8 +74,8 @@ Tekan `Ctrl + C` untuk keluar secara aman.
 itms-agents-daemon/
 ├── config/                     # Template konfigurasi agent
 ├── releases/                   # Bundel rilis binary & script instalasi
-│   ├── v0.2.2/                 # Arsip rilis v0.2.2 (ZIP, EXE, batch scripts, checksum)
-│   └── latest/                 # Salinan rilis terbaru (v0.2.2)
+│   ├── v0.2.3/                 # Arsip rilis v0.2.3 (ZIP, EXE, batch scripts, checksum)
+│   └── latest/                 # Salinan rilis terbaru (v0.2.3)
 ├── src/                        # Kode sumber Rust
 │   ├── classifier.rs           # Domain normalizer & FQDN classifier
 │   ├── config.rs               # TOML configuration loader

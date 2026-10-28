@@ -1,0 +1,3 @@
+2c6ea37e742990d3fad4ea57825ef167f9a12bd666102534af563905e00280b4  itms-agents-daemon-v0.2.3-windows-x64.exe
+c58ed144717fa2ba493fbdfc74c64916d9edb9a6adf065c54074d1c1c7f376a4  itms-agents-daemon-v0.2.3-windows-x64.zip
+

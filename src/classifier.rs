@@ -166,6 +166,17 @@ impl DomainClassifier {
         )
     }
 
+    /// Memeriksa apakah executable merupakan proses internal Windows
+    pub fn is_windows_internal_process(&self, exe_name: &str) -> bool {
+        is_windows_internal_process(exe_name)
+    }
+
+    /// Memeriksa apakah nama domain / proses harus diabaikan dari telemetri
+    #[allow(dead_code)]
+    pub fn is_ignored_process_or_domain(&self, name: &str) -> bool {
+        is_ignored_network_process_or_domain(name)
+    }
+
     /// Normalisasi FQDN (strip trailing dot, lowercase, buang www.)
     pub fn normalize_domain(&self, raw: &str) -> String {
         let mut d = raw.trim().to_lowercase();
@@ -266,9 +277,137 @@ fn capitalize_domain(domain: &str) -> String {
     domain.to_string()
 }
 
+/// Memeriksa apakah executable merupakan proses internal Windows (mpcmdrun.exe, svchost.exe, textinputhost.exe, dll.)
+pub fn is_windows_internal_process(exe_name: &str) -> bool {
+    let clean = exe_name.trim().to_lowercase();
+    let base = clean.strip_suffix(".exe").unwrap_or(&clean);
+    matches!(
+        base,
+        "svchost"
+            | "mpcmdrun"
+            | "msmpeng"
+            | "nissrv"
+            | "smartscreen"
+            | "securityhealthservice"
+            | "securityhealthsystray"
+            | "textinputhost"
+            | "ctfmon"
+            | "sihost"
+            | "shellexperiencehost"
+            | "startmenuexperiencehost"
+            | "searchhost"
+            | "searchindexer"
+            | "searchapp"
+            | "systemsettings"
+            | "applicationframehost"
+            | "lockapp"
+            | "taskhostw"
+            | "runtimebroker"
+            | "backgroundtaskhost"
+            | "dllhost"
+            | "conhost"
+            | "dashost"
+            | "wudfhost"
+            | "fontdrvhost"
+            | "mousocoreworker"
+            | "usoclient"
+            | "trustedinstaller"
+            | "tiworker"
+            | "compattelrunner"
+            | "devicecensus"
+            | "werfault"
+            | "werfaultsecure"
+            | "wermgr"
+            | "spoolsv"
+            | "msiexec"
+            | "sppsvc"
+            | "audiodg"
+            | "smss"
+            | "csrss"
+            | "wininit"
+            | "services"
+            | "lsass"
+            | "winlogon"
+            | "system"
+            | "system.local"
+    )
+}
+
+/// Memeriksa apakah nama proses merupakan format fallback PID yang gagal di-resolve (pid_*.exe)
+pub fn is_unresolved_pid_process(name: &str) -> bool {
+    let clean = name.trim().to_lowercase();
+    let base = clean.strip_suffix(".exe").unwrap_or(&clean);
+    if let Some(pid_str) = base.strip_prefix("pid_") {
+        !pid_str.is_empty() && pid_str.chars().all(|c| c.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
+/// Filter terpadu: apakah domain/proses harus diabaikan dari traffic accounting & telemetri
+pub fn is_ignored_network_process_or_domain(name: &str) -> bool {
+    let clean = name.trim().to_lowercase();
+    if clean.is_empty() {
+        return true;
+    }
+    if is_unresolved_pid_process(&clean) {
+        return true;
+    }
+    if is_windows_internal_process(&clean) {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_windows_internal_process_filter() {
+        assert!(is_windows_internal_process("mpcmdrun.exe"));
+        assert!(is_windows_internal_process("MPCMDRUN.EXE"));
+        assert!(is_windows_internal_process("svchost.exe"));
+        assert!(is_windows_internal_process("textinputhost.exe"));
+        assert!(is_windows_internal_process("msmpeng.exe"));
+        assert!(is_windows_internal_process("systemsettings.exe"));
+        assert!(is_windows_internal_process("system.local"));
+        assert!(is_windows_internal_process("system"));
+
+        // User / productive apps must not be ignored
+        assert!(!is_windows_internal_process("chrome.exe"));
+        assert!(!is_windows_internal_process("msedge.exe"));
+        assert!(!is_windows_internal_process("code.exe"));
+        assert!(!is_windows_internal_process("excel.exe"));
+        assert!(!is_windows_internal_process("slack.exe"));
+    }
+
+    #[test]
+    fn test_unresolved_pid_process_filter() {
+        assert!(is_unresolved_pid_process("pid_1234.exe"));
+        assert!(is_unresolved_pid_process("pid_0.exe"));
+        assert!(is_unresolved_pid_process("pid_99999"));
+        assert!(is_unresolved_pid_process("PID_5432.EXE"));
+
+        assert!(!is_unresolved_pid_process("pidgin.exe"));
+        assert!(!is_unresolved_pid_process("pid_abc.exe"));
+        assert!(!is_unresolved_pid_process("chrome.exe"));
+    }
+
+    #[test]
+    fn test_ignored_network_process_or_domain() {
+        assert!(is_ignored_network_process_or_domain(""));
+        assert!(is_ignored_network_process_or_domain("mpcmdrun.exe"));
+        assert!(is_ignored_network_process_or_domain("svchost.exe"));
+        assert!(is_ignored_network_process_or_domain("textinputhost.exe"));
+        assert!(is_ignored_network_process_or_domain("pid_7712.exe"));
+        assert!(is_ignored_network_process_or_domain("system.local"));
+
+        assert!(!is_ignored_network_process_or_domain("youtube.com"));
+        assert!(!is_ignored_network_process_or_domain("chatgpt.com"));
+        assert!(!is_ignored_network_process_or_domain("code.visualstudio.com"));
+        assert!(!is_ignored_network_process_or_domain("chrome.exe"));
+    }
 
     #[test]
     fn test_domain_normalization_and_classification() {

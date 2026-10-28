@@ -79,6 +79,13 @@ impl WindowTracker {
                     continue;
                 }
 
+                // Abaikan jika foreground window berasal dari proses internal Windows (textinputhost.exe, dll.)
+                if let Some(ref exe) = exe_opt {
+                    if self.classifier.is_windows_internal_process(exe) {
+                        continue;
+                    }
+                }
+
                 // 3. Klasifikasi: Jika desktop software (Excel, Slack, Code) langsung dipetakan.
                 // Jika browser, parsing judul tab ke domain dan kategori.
                 let (classification, is_browser) = if let Some(ref exe) = exe_opt {

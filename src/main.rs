@@ -11,6 +11,7 @@ mod storage;
 pub mod traffic;
 mod window_tracker;
 
+use classifier::is_ignored_network_process_or_domain;
 use chrono::Utc;
 use config::AgentConfig;
 use dns_etw::DnsEtwSniffer;
@@ -177,6 +178,13 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
             // Kuras traffic background yang tidak terafiliasi dengan window foreground
             let deltas = bg_aggregator.drain_deltas();
             for delta in deltas {
+                // Abaikan proses internal Windows (mpcmdrun, svchost, textinputhost, dll) dan pid_*.exe
+                if is_ignored_network_process_or_domain(&delta.domain)
+                    || is_ignored_network_process_or_domain(&delta.app_name)
+                {
+                    continue;
+                }
+
                 let record = ActivityRecord {
                     id: None,
                     domain: delta.domain,
