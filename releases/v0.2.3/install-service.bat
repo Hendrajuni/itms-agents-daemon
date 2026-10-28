@@ -26,19 +26,24 @@ if not exist "%~dp0agent.toml" (
 
 echo [INFO] Mendaftarkan ITMS Endpoint Agent ke Windows Service Control Manager...
 sc.exe create ITMSAgentService binPath= "\"%~dp0itms-agents-daemon.exe\" service" DisplayName= "ITMS Endpoint Telemetry Daemon" start= auto
-if %errorLevel% equ 0 (
-    sc.exe description ITMSAgentService "ITMS Windows Endpoint Agent for Application and DNS Telemetry Tracking" >nul
-    echo.
-    echo [SUCCESS] Windows Service 'ITMSAgentService' berhasil didaftarkan!
-    echo.
-    choice /M "Apakah Anda ingin langsung menyalakan service sekarang?"
-    if %errorlevel% equ 1 (
-        sc.exe start ITMSAgentService
-    )
-) else (
-    echo.
-    echo [FAILED] Gagal mendaftarkan service. Periksa pesan kesalahan di atas.
-)
+if %errorLevel% neq 0 goto :failed
 
+sc.exe description ITMSAgentService "ITMS Windows Endpoint Agent for Application and DNS Telemetry Tracking" >nul
+echo.
+echo [SUCCESS] Windows Service 'ITMSAgentService' berhasil didaftarkan!
+echo.
+choice /M "Apakah Anda ingin langsung menyalakan service sekarang?"
+if errorlevel 2 goto :end
+if errorlevel 1 (
+    echo [INFO] Menyalakan service 'ITMSAgentService'...
+    sc.exe start ITMSAgentService
+)
+goto :end
+
+:failed
+echo.
+echo [FAILED] Gagal mendaftarkan service. Periksa pesan kesalahan di atas.
+
+:end
 echo.
 pause
