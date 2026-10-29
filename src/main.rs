@@ -1,6 +1,7 @@
 mod classifier;
 mod config;
 mod dns_etw;
+pub mod eventlog_watcher;
 mod flusher;
 mod hardware;
 mod net_etw;
@@ -15,10 +16,11 @@ use classifier::is_ignored_network_process_or_domain;
 use chrono::Utc;
 use config::AgentConfig;
 use dns_etw::DnsEtwSniffer;
+use eventlog_watcher::EventLogWatcher;
 use flusher::TelemetryFlusher;
 use hardware::HardwareCollector;
 use net_etw::NetEtwConsumer;
-use storage::{ActivityRecord, TelemetryStorage};
+use storage::{ActivityRecord, EventLogRecord, TelemetryStorage};
 use traffic::{DnsResolutionCache, TrafficAggregator};
 use window_tracker::WindowTracker;
 
@@ -200,7 +202,50 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
         }
     });
 
-    // 5. Jalankan HTTP Batch Flusher Loop
+    // 5. Jalankan Windows EventLog Ingestion Watcher (Security & System Push Subscriber)
+    let (_eventlog_watcher, mut eventlog_rx) = EventLogWatcher::new(stop_signal.clone());
+    let eventlog_storage = storage.clone();
+    let stop_eventlog = stop_signal.clone();
+    let effective_hostname_str = effective_hostname.to_string();
+    let effective_ip_str = effective_ip.to_string();
+    let machine_uuid_str = identity.machine_uuid.clone();
+
+    let eventlog_handle = tokio::spawn(async move {
+        info!("Windows EventLog subscriber worker aktif mendengarkan event...");
+        while !stop_eventlog.load(Ordering::Relaxed) {
+            match tokio::time::timeout(Duration::from_millis(500), eventlog_rx.recv()).await {
+                Ok(Some(parsed)) => {
+                    let record = EventLogRecord {
+                        id: None,
+                        timestamp: parsed.timestamp,
+                        hostname: if effective_hostname_str != "localhost" && !effective_hostname_str.is_empty() {
+                            effective_hostname_str.clone()
+                        } else {
+                            parsed.hostname
+                        },
+                        host_ip: effective_ip_str.clone(),
+                        machine_uuid: machine_uuid_str.clone(),
+                        event_id: parsed.event_id,
+                        channel: parsed.channel,
+                        severity: parsed.severity,
+                        provider: parsed.provider,
+                        message: parsed.message,
+                        details_json: serde_json::to_string(&parsed.details).unwrap_or_else(|_| "{}".to_string()),
+                        created_at: Utc::now().to_rfc3339(),
+                    };
+
+                    if let Err(e) = eventlog_storage.insert_event_log(&record) {
+                        error!("Gagal menyimpan event log ke SQLite buffer: {}", e);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {} // Timeout tick
+            }
+        }
+        info!("Windows EventLog subscriber worker dihentikan.");
+    });
+
+    // 6. Jalankan HTTP Batch Flusher Loop (Telemetri Aktivitas & Windows EventLog)
     let flusher = TelemetryFlusher::new(cfg.server.clone(), cfg.device.clone(), storage.clone());
     let flusher_interval = Duration::from_secs(cfg.server.flusher_interval_secs);
     let stop_flusher = stop_signal.clone();
@@ -208,11 +253,14 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
     let flusher_handle = tokio::spawn(async move {
         info!("Memulai HTTP Batch Flusher loop (interval: {:?})...", flusher_interval);
 
-        // Pengiriman awal (Initial Sync) 2 detik setelah start untuk registrasi inventaris
+        // Pengiriman awal (Initial Sync) 2 detik setelah start untuk registrasi inventaris & pending logs
         tokio::time::sleep(Duration::from_secs(2)).await;
         if !stop_flusher.load(Ordering::Relaxed) {
             if let Err(e) = flusher.flush_once(&mut hardware).await {
                 warn!("Initial Telemetry & Inventory Sync tertunda (akan dicoba lagi pada siklus berikutnya): {}", e);
+            }
+            if let Err(e) = flusher.flush_event_logs(&mut hardware).await {
+                warn!("Initial EventLog Sync tertunda: {}", e);
             }
         }
 
@@ -225,6 +273,10 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
             if let Err(e) = flusher.flush_once(&mut hardware).await {
                 warn!("Gagal melakukan flush telemetri (akan dicoba lagi batch berikutnya): {}", e);
             }
+
+            if let Err(e) = flusher.flush_event_logs(&mut hardware).await {
+                warn!("Gagal melakukan flush event log (akan dicoba lagi batch berikutnya): {}", e);
+            }
         }
         info!("HTTP Batch Flusher loop dihentikan.");
     });
@@ -235,6 +287,6 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
     }
 
     info!("Menunggu seluruh worker tasks selesai menyimpan data...");
-    let _ = tokio::join!(tracker_handle, dns_handle, net_handle, bg_handle, flusher_handle);
+    let _ = tokio::join!(tracker_handle, dns_handle, net_handle, bg_handle, eventlog_handle, flusher_handle);
     info!("ITMS Endpoint Agent Daemon sukses dimatikan.");
 }

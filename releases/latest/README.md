@@ -2,15 +2,20 @@
 
 [![Rust Version](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org/)
 [![Target Platform](https://img.shields.io/badge/platform-Windows%20x86__64-blue.svg)](https://microsoft.com/windows)
-[![Release Version](https://img.shields.io/badge/release-v0.2.4-brightgreen.svg)](releases/v0.2.4/)
+[![Release Version](https://img.shields.io/badge/release-v0.3.0-brightgreen.svg)](releases/v0.3.0/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**ITMS Endpoint Agent Daemon** adalah background service Windows mandiri (*standalone single executable*) berbasis **Rust** yang dirancang untuk mengumpulkan telemetri aktivitas aplikasi, domain web, volume trafik data jaringan riil, spesifikasi perangkat keras, dan audit inventaris software secara 100% presisi (*ground truth*), lalu menyinkronkannya ke server pusat **ITMS-Pro** (Django).
+**ITMS Endpoint Agent Daemon** adalah background service Windows mandiri (*standalone single executable*) berbasis **Rust** yang dirancang untuk mengumpulkan telemetri aktivitas aplikasi, domain web, volume trafik data jaringan riil, pengawasan Windows Event Log keamanan & crash sistem, spesifikasi perangkat keras, dan audit inventaris software secara 100% presisi (*ground truth*), lalu menyinkronkannya ke server pusat **ITMS-Pro** (Django).
 
 ---
 
 ## 🌟 Fitur Utama
 
+* **🛡️ Windows EventLog Real-Time Push Ingestion (v0.3.0):** Modul background subscriber pengawas Windows Event Log (`eventlog_watcher`) yang berjalan murni secara *event-driven* (**0% CPU idle**) via Win32 `EvtSubscribe` (`EvtSubscribeToFutureEvents`).
+  * **Insiden Keamanan (Security Channel):** Menangkap Brute-Force Logon Failed (Event 4625), User Account Created (4720), User Deleted (4726), dan Account Lockout (4740).
+  * **Kesehatan Sistem & Stabilitas (System Channel):** Menangkap Service Crash (7034), Service Stopped (7036 dengan filter kebisingan), File System NTFS Corrupt (55), Volume Disk Corrupt (98), Planned Restart/Shutdown (1074), dan Kernel-Power Dirty Reboot / BSOD / Mati Lampu (41).
+  * **Prinsip Anti-Lokalisasi & Deterministik:** Deskripsi pesan dirangkai deterministik dalam Bahasa Inggris standar dari data mentah `<EventData>`, bebas kendala perbedaan bahasa sistem operasi.
+  * **Ketahanan Offline (SQLite Buffer):** Disimpan ke tabel `event_log_queue` di `%PROGRAMDATA%\ITMS\buffer\telemetry_queue.db` (kuota 20 MB FIFO drop) dan otomatis di-drain secara bertahap (batch 50 entri) via endpoint `POST /network/api/logs/ingest/` dengan header ganda `X-ITMS-Agent-Key`, `X-ITMS-Agent-Token`, dan `X-Machine-UUID`.
 * **🎯 Native IP Helper MAC Binding & Physical Interface Detection (v0.2.4):** Deteksi identitas antarmuka jaringan fisik (Wi-Fi / Ethernet) menggunakan Windows Native IP Helper API (`GetAdaptersAddresses`), mengorelasikan MAC address fisik secara akurat dengan rute IP outbound lokal aktif, serta memfilter adapter virtual yang tidak relevan (TAP, OpenVPN, Wi-Fi Direct Virtual Adapter, VPN tunnel) agar terhindar dari duplikasi entri IPAM.
 * **🏷️ Device Identity Override Support (v0.2.4):** Mendukung konfigurasi *override* IP, MAC address, dan Hostname melalui seksi `[device]` pada `agent.toml`, memudahkan pengujian di luar jaringan kantor (WFH / remote) agar telemetri tetap terpetakan ke entri endpoint kantor yang tepat.
 * **🛡️ Windows Internal Process Filtering & Noise Suppression (v0.2.3):** Mengabaikan koneksi proses sistem Windows internal (`mpcmdrun.exe`, `svchost.exe`, `textinputhost.exe`, `msmpeng.exe`, `searchhost.exe`, `smartscreen.exe`, PID 0, PID 4, dll.) dan mencegah pengiriman proses yang gagal di-resolve namanya (`pid_*.exe`), menjaga database ITMS-Pro tetap bersih.
@@ -32,7 +37,7 @@
 ## 🚀 Panduan Instalasi Cepat
 
 ### 1. Unduh Berkas Rilis
-Unduh paket rilis terbaru di tab [**Releases**](https://github.com/Hendrajuni/itms-agents-daemon/releases/latest) atau gunakan folder [`releases/v0.2.4/`](releases/v0.2.4/) / [`releases/latest/`](releases/latest/).
+Unduh paket rilis terbaru di tab [**Releases**](https://github.com/Hendrajuni/itms-agents-daemon/releases/latest) atau gunakan folder [`releases/v0.3.0/`](releases/v0.3.0/) / [`releases/latest/`](releases/latest/).
 
 ### 2. Konfigurasi `agent.toml`
 Salin template `agent.toml.example` menjadi `agent.toml` pada folder instalasi atau ke `%PROGRAMDATA%\ITMS\agent.toml`:
@@ -89,13 +94,14 @@ Tekan `Ctrl + C` untuk keluar secara aman.
 itms-agents-daemon/
 ├── config/                     # Template konfigurasi agent (agent.toml.example)
 ├── releases/                   # Bundel rilis binary & script instalasi
-│   ├── v0.2.4/                 # Arsip rilis v0.2.4 (ZIP, EXE, batch scripts, checksum)
-│   └── latest/                 # Salinan rilis terbaru (v0.2.4)
+│   ├── v0.3.0/                 # Arsip rilis v0.3.0 (ZIP, EXE, batch scripts, checksum)
+│   └── latest/                 # Salinan rilis terbaru (v0.3.0)
 ├── src/                        # Kode sumber Rust
 │   ├── classifier.rs           # Domain normalizer & FQDN classifier
 │   ├── config.rs               # TOML configuration loader & device overrides
 │   ├── dns_etw.rs              # Event Tracing for Windows DNS sniffer
-│   ├── flusher.rs              # HTTP batch flusher, 2-way command queue & inventory scheduler
+│   ├── eventlog_watcher.rs     # Windows EventLog push-subscriber (Security & System)
+│   ├── flusher.rs              # HTTP batch flusher, 2-way command queue & log flusher
 │   ├── hardware.rs             # Endpoint identity (IP Helper API MAC & UUID) & system metrics
 │   ├── main.rs                 # CLI entry point & worker coordinator
 │   ├── net_etw.rs              # Kernel TCPIP event stream accounting (ETW)

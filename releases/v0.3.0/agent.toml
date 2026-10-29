@@ -2,8 +2,10 @@
 # Salin file ini menjadi 'config/agent.toml' atau ke '%PROGRAMDATA%\ITMS\agent.toml'
 
 [server]
-# URL endpoint backend ITMS-Pro
+# URL endpoint backend ITMS-Pro untuk telemetri aktivitas aplikasi
 url = "https://itms.domain.com/network/api/telemetry/push/"
+# Opsional: URL endpoint backend ITMS-Pro untuk Windows EventLog ingestion (otomatis diturunkan dari url jika tidak diset)
+# logs_url = "https://itms.domain.com/network/api/logs/ingest/"
 # Token autentikasi agent (disesuaikan dengan Agent Key pada konfigurasi ITMS-Pro)
 agent_key = "sec-agent-token-xyz-123"
 # Interval pengiriman telemetri ke server (detik)

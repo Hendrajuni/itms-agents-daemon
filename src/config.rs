@@ -22,12 +22,29 @@ pub struct DeviceConfig {
 pub struct ServerConfig {
     pub url: String,
     pub agent_key: String,
+    #[serde(default)]
+    pub logs_url: Option<String>,
     #[serde(default = "default_flusher_interval")]
     pub flusher_interval_secs: u64,
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
     #[serde(default = "default_timeout")]
     pub request_timeout_secs: u64,
+}
+
+impl ServerConfig {
+    pub fn get_logs_url(&self) -> String {
+        if let Some(ref l_url) = self.logs_url {
+            return l_url.clone();
+        }
+        if self.url.contains("/network/api/telemetry/push/") {
+            self.url.replace("/network/api/telemetry/push/", "/network/api/logs/ingest/")
+        } else if self.url.ends_with('/') {
+            format!("{}network/api/logs/ingest/", self.url)
+        } else {
+            format!("{}/network/api/logs/ingest/", self.url)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +84,7 @@ impl Default for AgentConfig {
             server: ServerConfig {
                 url: "https://itms.domain.com/network/api/telemetry/push/".to_string(),
                 agent_key: "sec-agent-token-xyz-123".to_string(),
+                logs_url: None,
                 flusher_interval_secs: default_flusher_interval(),
                 batch_size: default_batch_size(),
                 request_timeout_secs: default_timeout(),

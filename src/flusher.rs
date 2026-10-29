@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TelemetryActivityItem {
@@ -38,6 +38,20 @@ pub struct TelemetryPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub installed_apps: Option<Vec<InstalledApp>>,
     pub activities: Vec<TelemetryActivityItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EventLogPayloadItem {
+    pub timestamp: String,
+    pub hostname: String,
+    pub host_ip: String,
+    pub machine_uuid: String,
+    pub event_id: u32,
+    pub channel: String,
+    pub severity: String,
+    pub provider: String,
+    pub message: String,
+    pub details: serde_json::Value,
 }
 
 /// Struktur deserialisasi respons server ITMS (termasuk antrean perintah Two-Way Command Queue)
@@ -231,6 +245,81 @@ impl TelemetryFlusher {
             Err(format!("HTTP Error {}: {}", status, body).into())
         }
     }
+
+    /// Melakukan push batch event log dari SQLite lokal ke ITMS endpoint `/network/api/logs/ingest/`
+    pub async fn flush_event_logs(&self, hardware: &mut HardwareCollector) -> Result<usize, Box<dyn std::error::Error>> {
+        let unsynced = self.storage.get_unsynced_event_logs(50)?;
+        if unsynced.is_empty() {
+            return Ok(0);
+        }
+
+        let identity = hardware.get_identity();
+        let effective_ip = self.device_cfg.override_ip.as_deref().unwrap_or(&identity.ip_address);
+        let effective_hostname = self.device_cfg.override_hostname.as_deref().unwrap_or(&identity.hostname);
+
+        let mut ids = Vec::new();
+        let mut payload_items = Vec::new();
+
+        for item in unsynced {
+            if let Some(id) = item.id {
+                ids.push(id);
+            }
+            let details: serde_json::Value = serde_json::from_str(&item.details_json)
+                .unwrap_or_else(|_| serde_json::json!({}));
+
+            payload_items.push(EventLogPayloadItem {
+                timestamp: item.timestamp,
+                hostname: if effective_hostname != "localhost" && !effective_hostname.is_empty() {
+                    effective_hostname.to_string()
+                } else {
+                    item.hostname
+                },
+                host_ip: effective_ip.to_string(),
+                machine_uuid: identity.machine_uuid.clone(),
+                event_id: item.event_id,
+                channel: item.channel,
+                severity: item.severity,
+                provider: item.provider,
+                message: item.message,
+                details,
+            });
+        }
+
+        let logs_url = self.server_cfg.get_logs_url();
+        let count = payload_items.len();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        if let Ok(key_val) = HeaderValue::from_str(&self.server_cfg.agent_key) {
+            headers.insert("X-ITMS-Agent-Key", key_val.clone());
+            headers.insert("X-ITMS-Agent-Token", key_val);
+        }
+        if let Ok(uuid_val) = HeaderValue::from_str(&identity.machine_uuid) {
+            headers.insert("X-Machine-UUID", uuid_val);
+        }
+
+        info!("Mengirim batch {} Windows EventLog ke {}...", count, logs_url);
+
+        let res = self.client.post(&logs_url)
+            .headers(headers)
+            .json(&payload_items)
+            .send()
+            .await?;
+
+        if res.status().is_success() {
+            let status_code = res.status().as_u16();
+            info!("Batch {} Windows EventLog SUKSES terkirim ke server (HTTP {}).", count, status_code);
+            if !ids.is_empty() {
+                self.storage.delete_or_mark_synced_event_logs(&ids)?;
+            }
+            Ok(count)
+        } else {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            warn!("Server menolak pengiriman event log (HTTP {}): {}", status, body);
+            Err(format!("HTTP Error {}: {}", status, body).into())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -248,5 +337,55 @@ mod tests {
         let parsed2: ServerPushResponse = serde_json::from_str(json_without_cmd).unwrap();
         assert_eq!(parsed2.status, "success");
         assert_eq!(parsed2.command, None);
+    }
+
+    #[test]
+    fn test_server_config_get_logs_url() {
+        let cfg = ServerConfig {
+            url: "https://itms.domain.com/network/api/telemetry/push/".to_string(),
+            agent_key: "secret".to_string(),
+            logs_url: None,
+            flusher_interval_secs: 60,
+            batch_size: 100,
+            request_timeout_secs: 15,
+        };
+        assert_eq!(cfg.get_logs_url(), "https://itms.domain.com/network/api/logs/ingest/");
+
+        let cfg_custom = ServerConfig {
+            url: "https://itms.domain.com/network/api/telemetry/push/".to_string(),
+            agent_key: "secret".to_string(),
+            logs_url: Some("https://custom.itms.com/api/logs/".to_string()),
+            flusher_interval_secs: 60,
+            batch_size: 100,
+            request_timeout_secs: 15,
+        };
+        assert_eq!(cfg_custom.get_logs_url(), "https://custom.itms.com/api/logs/");
+    }
+
+    #[test]
+    fn test_event_log_payload_serialization() {
+        let payload = vec![
+            EventLogPayloadItem {
+                timestamp: "2026-10-29T13:30:00Z".to_string(),
+                hostname: "SRV-DC01".to_string(),
+                host_ip: "192.168.1.15".to_string(),
+                machine_uuid: "4C4C4544-004B-4D10-8043-B2C04F323533".to_string(),
+                event_id: 4625,
+                channel: "Security".to_string(),
+                severity: "WARNING".to_string(),
+                provider: "Microsoft-Windows-Security-Auditing".to_string(),
+                message: "An account failed to log on.".to_string(),
+                details: serde_json::json!({
+                    "target_user": "Administrator",
+                    "status_code": "0xC000006D"
+                }),
+            }
+        ];
+
+        let json_str = serde_json::to_string(&payload).unwrap();
+        assert!(json_str.contains("\"event_id\":4625"));
+        assert!(json_str.contains("\"channel\":\"Security\""));
+        assert!(json_str.contains("\"severity\":\"WARNING\""));
+        assert!(json_str.contains("\"target_user\":\"Administrator\""));
     }
 }
