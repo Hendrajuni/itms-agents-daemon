@@ -1,2 +1,2 @@
 77c545a957deb9b1999502495471b8459bd7c576e30933557109e1d463f86e96  itms-agents-daemon.exe
-acae07b22d4005692fd39841ca7e99a6c7f953f155f8b0b0a231193cee397db7  itms-agents-daemon-latest-windows-x64.zip
+05ff0c24d12aa8df4678eb796e5f66dc747d264a16671d55b71d686e6ac4b2c7  itms-agents-daemon-latest-windows-x64.zip
