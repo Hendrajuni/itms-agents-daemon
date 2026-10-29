@@ -1,76 +1,100 @@
-# ITMS Endpoint Agent Daemon - Release v0.2.3 (Windows x86_64)
+# ITMS Endpoint Agent Daemon (Windows)
 
-> **Versi Rilis:** `v0.2.3`  
-> **Arsitektur:** Windows 64-bit (`x86_64-pc-windows-gnu`)  
-> **Target OS:** Windows 10 / Windows 11 / Windows Server 2016+  
-> **Bahasa:** Rust (Edition 2021)  
-> **Ukuran Binary:** ~3.21 MB (Single standalone executable, zero external DLL)
+[![Rust Version](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org/)
+[![Target Platform](https://img.shields.io/badge/platform-Windows%20x86__64-blue.svg)](https://microsoft.com/windows)
+[![Release Version](https://img.shields.io/badge/release-v0.2.3-brightgreen.svg)](releases/v0.2.3/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
----
-
-## 🌟 Fitur Utama v0.2.3 (Traffic Filter & Noise Suppression)
-
-1. **🛡️ Windows Internal Process Filtering (Baru di v0.2.3):**
-   * Mengabaikan koneksi socket dan transfer data dari proses sistem latar belakang internal Windows (seperti `mpcmdrun.exe`, `svchost.exe`, `textinputhost.exe`, `msmpeng.exe`, `searchhost.exe`, `taskhostw.exe`, `runtimebroker.exe`, `smartscreen.exe`, `ctfmon.exe`, dll.).
-   * Mengabaikan PID 0 dan PID 4 (`system` / `system.local`).
-2. **🚫 Unresolved Process Name Suppression (Baru di v0.2.3):**
-   * Menghentikan pengiriman dan pencatatan nama proses yang gagal di-resolve oleh Windows API (`pid_*.exe`), menjaga kebersihan antrean SQLite dan database server ITMS-Pro.
-   * Strategi multi-layer defense pada ETW TCPIP consumer, in-memory traffic aggregator, background traffic drain loop, dan HTTP pusher batch queue.
-3. **⚡ Two-Way Command Queue & On-Demand Audit (v0.2.2):**
-   * Menerima payload perintah `TRIGGER_FULL_SCAN` dari dashboard web ITMS-Pro (Django) saat admin mengklik tombol `[⚡ Sinkronkan]`.
-   * Langsung mengeksekusi pemindaian hardware & audit software seketika (*real-time*) pada siklus berikutnya tanpa menunggu interval 24 jam.
-4. **📊 Windows Native TCPIP Traffic Accounting Engine (v0.2.1+):**
-   * Mengukur volume data jaringan (download/upload byte) menggunakan kernel ETW provider `Microsoft-Windows-TCPIP` (Events 1074, 1073, 1170, 1169).
-   * Merekam byte fisik jaringan per proses dan per domain tanpa instalasi driver pihak ketiga (tanpa WinPcap / Npcap).
-5. **Active Window & Screen Time Tracker (`src/window_tracker.rs`):**
-   * Pelacakan judul aplikasi dan tab browser yang sedang aktif secara presisi (*ground truth*).
-   * Deteksi *User Idle State* (otomatis pause saat pengguna tidak aktif > 5 menit).
-6. **DNS Query Sniffer Engine (`src/dns_etw.rs`):**
-   * Konsumsi Event Tracing for Windows (ETW) provider `Microsoft-Windows-DNS-Client` (Event ID 3008).
-   * Mengetahui domain web dan Process ID (PID) pemanggil bahkan saat pengguna memakai mode Incognito / DoH.
-7. **Hardware & OS Specification Extractor (`src/spec.rs`):**
-   * Ekstraksi identitas perangkat: Pabrikan (Manufacturer), Model, dan Serial Number / Service Tag via SMBIOS BIOS.
-   * Spesifikasi OS lengkap: Windows Edition, Display Version, Build Number, dan Arsitektur OS.
-   * Spesifikasi Jeroan: Processor (CPU Model, Cores, Threads), Total RAM Fisik (MB/GB), GPU Display Adapter, dan rincian partisi drive storage (`C:`, `D:`, kapasitas total, dan free space).
-8. **Installed Software Inventory Audit Scanner (`src/software.rs`):**
-   * Audit seluruh aplikasi desktop yang terpasang di komputer pengguna melalui scanning Registry Windows (HKLM 64-bit, WOW6432Node, HKCU per-user).
-   * Auto-purge & auto-sync dengan backend ITMS-Pro.
-9. **Offline SQLite Queue Buffer (`src/storage.rs`):**
-   * Penyimpanan lokal transaksional SQLite (`%PROGRAMDATA%\ITMS\buffer\telemetry_queue.db`) saat koneksi jaringan terputus (offline-first).
-10. **Keamanan & Kepatuhan Non-Intrusive:**
-    * 100% patuh UU PDP & Windows Defender: Zero packet capture driver, zero DLL injection, no keylogger, no screen capture.
-    * Penggunaan memori < 15 MB dan CPU idle < 0.1%.
+**ITMS Endpoint Agent Daemon** adalah background service Windows mandiri (*standalone single executable*) berbasis **Rust** yang dirancang untuk mengumpulkan telemetri aktivitas aplikasi, domain web, volume trafik data jaringan riil, spesifikasi perangkat keras, dan audit inventaris software secara 100% presisi (*ground truth*), lalu menyinkronkannya ke server pusat **ITMS-Pro** (Django).
 
 ---
 
-## 📁 Struktur Berkas Rilis
+## 🌟 Fitur Utama
 
-* **`itms-agents-daemon-v0.2.3-windows-x64.exe`** : Binary release dengan nama berversi lengkap untuk arsip GitHub Releases.
-* **`itms-agents-daemon.exe`** : Binary release standar yang digunakan oleh Windows Service wrapper.
-* **`itms-agents-daemon-v0.2.3-windows-x64.zip`** : Paket arsip ZIP rilis v0.2.3.
-* **`itms-agents-daemon-latest-windows-x64.zip`** : Alias paket ZIP untuk automasi download rilis terbaru.
-* **`agent.toml.example`** : Template konfigurasi agent (URL backend ITMS-Pro, Agent Key, dll).
-* **`install-service.bat`** : Skrip batch 1-klik untuk mendaftarkan dan menyalakan agent sebagai Windows Background Service (`LocalSystem`).
-* **`uninstall-service.bat`** : Skrip batch untuk menghentikan dan mencabut Windows Service.
-* **`start-service.bat`** / **`stop-service.bat`** : Skrip kontrol service.
-* **`run-interactive.bat`** : Menjalankan agent di jendela konsol (mode debug interaktif).
+* **🛡️ Windows Internal Process Filtering & Noise Suppression (v0.2.3):** Mengabaikan koneksi proses sistem Windows internal (`mpcmdrun.exe`, `svchost.exe`, `textinputhost.exe`, `msmpeng.exe`, `searchhost.exe`, `smartscreen.exe`, PID 0, PID 4, dll.) dan mencegah pengiriman proses yang gagal di-resolve namanya (`pid_*.exe`), menjaga database ITMS-Pro tetap bersih.
+* **⚡ Two-Way Command Queue & On-Demand Audit (v0.2.2):** Menerima instruksi instan `TRIGGER_FULL_SCAN` dari dashboard web ITMS-Pro (Django) saat admin mengklik tombol `[⚡ Sinkronkan]`, langsung memicu audit hardware & inventaris software secara *real-time* tanpa menunggu siklus 24 jam.
+* **📊 Windows Native TCPIP Traffic Accounting Engine (v0.2.1+):** Menangkap byte riil TCP/UDP data transfer via kernel Windows *Event Tracing for Windows* (ETW Provider: `Microsoft-Windows-TCPIP`) tanpa driver pihak ketiga (*zero Npcap/WinPcap*), mengagregasikan volume traffic fisik per domain dan proses aplikasi.
+* **🌐 Windows DNS ETW Sniffer Engine:** Menangkap query DNS via ETW (`Microsoft-Windows-DNS-Client`, Event ID 3008) beserta Process ID (PID) pemanggil, bahkan pada mode *Incognito* / *DoH*.
+* **🕒 Active Window & Screen Time Tracker:** Pelacakan durasi aktif jendela aplikasi dan judul situs browser dengan deteksi otomatis status *User Idle* (> 5 menit tidak ada input mouse/keyboard).
+* **💻 Hardware & OS Specification Extractor:** Ekstraksi otomatis Manufacturer, Model, BIOS Serial Number / Service Tag, OS Edition & Build, CPU (Cores/Threads), Total RAM (MB), GPU Display Adapter, dan partisi drive storage (`C:`, `D:`, free space).
+* **📦 Installed Software Inventory Audit Scanner:** Pemindaian seluruh aplikasi terinstal di Windows Registry (HKLM 64-bit, WOW6432Node, HKCU per-user) dengan sinkronisasi otomatis ke database pusat.
+* **💾 Offline-First FIFO Storage Buffer:** Menyimpan antrean telemetri ke database lokal SQLite (`%PROGRAMDATA%\ITMS\buffer\telemetry_queue.db`) saat koneksi terputus dan otomatis di-drain saat kembali online.
+* **🛡️ Kinerja Ringan & Aman (Non-Intrusive):**
+  * Ukuran binary tunggal: **~3.21 MB** (*zero external DLL*).
+  * Penggunaan memori: **< 15 MB RAM**, beban CPU idle: **< 0.1%**.
+  * Tidak menggunakan driver packet capture pihak ketiga (tanpa WinPcap/Npcap), tanpa screen capture, tanpa keylogger, dan 100% patuh Microsoft Defender & UU PDP.
 
 ---
 
-## 🚀 Panduan Pemasangan Cepat
+## 🚀 Panduan Instalasi Cepat
 
-1. Salin `agent.toml.example` menjadi `agent.toml`:
-   ```cmd
-   copy agent.toml.example agent.toml
-   ```
-2. Buka `agent.toml` dengan text editor, lalu masukkan URL ITMS-Pro backend dan Agent Key Anda:
-   ```toml
-   [server]
-   url = "http://192.168.0.2:8000/network/api/telemetry/push/"
-   agent_key = "token-rahasia-anda"
-   ```
-3. Klik kanan pada **`install-service.bat`**, lalu pilih **"Run as administrator"**.
-4. Verifikasi status service melalui PowerShell atau Services console (`services.msc`):
-   ```powershell
-   Get-Service -Name ITMSAgentService
-   ```
+### 1. Unduh Berkas Rilis
+Unduh paket rilis terbaru di tab [**Releases**](https://github.com/Hendrajuni/itms-agents-daemon/releases/latest) atau gunakan folder [`releases/v0.2.3/`](releases/v0.2.3/).
+
+### 2. Konfigurasi `agent.toml`
+Salin template `agent.toml.example` menjadi `agent.toml` pada folder instalasi:
+```toml
+[server]
+url = "http://<IP-SERVER-ITMS-PRO>:8000/network/api/telemetry/push/"
+agent_key = "sec-agent-token-xyz-123"
+flusher_interval_secs = 60
+batch_size = 100
+
+[tracker]
+window_sampling_secs = 3
+idle_threshold_secs = 300
+
+[storage]
+db_path = "C:\\ProgramData\\ITMS\\buffer\\telemetry_queue.db"
+max_db_size_mb = 50
+```
+
+### 3. Jalankan Agent
+
+#### Opsi A: Daftarkan sebagai Windows Service (Permanen di Background)
+Klik kanan file **`install-service.bat`** lalu pilih **"Run as Administrator"**.  
+Service akan terdaftar sebagai `ITMSAgentService` dengan tipe startup `Automatic` (berjalan terus di background).
+
+* Untuk menyalakan: Jalankan `start-service.bat` atau via PowerShell: `Start-Service ITMSAgentService`
+* Untuk mematikan: Jalankan `stop-service.bat` atau via PowerShell: `Stop-Service ITMSAgentService`
+* Untuk mencabut service: Klik kanan `uninstall-service.bat` -> **"Run as Administrator"**.
+
+#### Opsi B: Mode Interaktif / Debug (Konsol Foreground)
+Jalankan file **`run-interactive.bat`** atau melalui terminal:
+```powershell
+.\itms-agents-daemon.exe run
+```
+Tekan `Ctrl + C` untuk keluar secara aman.
+
+---
+
+## 🏗️ Struktur Proyek
+
+```text
+itms-agents-daemon/
+├── config/                     # Template konfigurasi agent
+├── releases/                   # Bundel rilis binary & script instalasi
+│   ├── v0.2.3/                 # Arsip rilis v0.2.3 (ZIP, EXE, batch scripts, checksum)
+│   └── latest/                 # Salinan rilis terbaru (v0.2.3)
+├── src/                        # Kode sumber Rust
+│   ├── classifier.rs           # Domain normalizer & FQDN classifier
+│   ├── config.rs               # TOML configuration loader
+│   ├── dns_etw.rs              # Event Tracing for Windows DNS sniffer
+│   ├── flusher.rs              # HTTP batch flusher, 2-way command queue & inventory scheduler
+│   ├── hardware.rs             # Endpoint identity & system metrics
+│   ├── main.rs                 # CLI entry point & worker coordinator
+│   ├── net_etw.rs              # Kernel TCPIP event stream accounting (ETW)
+│   ├── service.rs              # Windows Service Control Manager wrapper
+│   ├── software.rs             # Windows Registry software audit scanner
+│   ├── spec.rs                 # Hardware & OS specification extractor
+│   ├── storage.rs              # SQLite FIFO queue & offline storage
+│   ├── traffic.rs              # Network traffic & DNS resolution aggregator
+│   └── window_tracker.rs       # Foreground window title & user idle tracker
+├── Cargo.toml                  # Rust dependencies & LTO profile configuration
+└── README.md                   # Dokumentasi repositori
+```
+
+---
+
+## 📄 Lisensi
+Didistribusikan di bawah lisensi MIT. Lihat berkas `LICENSE` untuk informasi lebih lanjut.
