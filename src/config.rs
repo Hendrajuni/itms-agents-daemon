@@ -9,6 +9,44 @@ pub struct AgentConfig {
     pub tracker: TrackerConfig,
     pub storage: StorageConfig,
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub policy: PolicyConfig,
+    #[serde(default)]
+    pub updater: UpdaterConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyConfig {
+    #[serde(default = "default_enforce_browser_policy")]
+    pub enforce_browser_policy: bool,
+    #[serde(default = "default_browser_history_interval")]
+    pub browser_history_interval_secs: u64,
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            enforce_browser_policy: default_enforce_browser_policy(),
+            browser_history_interval_secs: default_browser_history_interval(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdaterConfig {
+    #[serde(default = "default_updater_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_updater_interval")]
+    pub check_interval_secs: u64,
+}
+
+impl Default for UpdaterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_updater_enabled(),
+            check_interval_secs: default_updater_interval(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -45,6 +83,19 @@ impl ServerConfig {
             format!("{}/network/api/logs/ingest/", self.url)
         }
     }
+
+    pub fn get_latest_release_url(&self) -> String {
+        if self.url.contains("/network/api/telemetry/push/") {
+            self.url.replace(
+                "/network/api/telemetry/push/",
+                "/network/api/agent/latest-release/",
+            )
+        } else if self.url.ends_with('/') {
+            format!("{}network/api/agent/latest-release/", self.url)
+        } else {
+            format!("{}/network/api/agent/latest-release/", self.url)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +128,10 @@ fn default_idle_threshold() -> u64 { 300 }
 fn default_db_path() -> String { "C:\\ProgramData\\ITMS\\buffer\\telemetry_queue.db".to_string() }
 fn default_max_db_size() -> u64 { 50 }
 fn default_log_level() -> String { "info".to_string() }
+fn default_enforce_browser_policy() -> bool { true }
+fn default_browser_history_interval() -> u64 { 120 }
+fn default_updater_enabled() -> bool { true }
+fn default_updater_interval() -> u64 { 3600 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -101,6 +156,8 @@ impl Default for AgentConfig {
             logging: LoggingConfig {
                 level: default_log_level(),
             },
+            policy: PolicyConfig::default(),
+            updater: UpdaterConfig::default(),
         }
     }
 }

@@ -32,6 +32,17 @@ pub struct EventLogRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserVisitRecord {
+    pub id: Option<i64>,
+    pub domain: String,
+    pub page_title: String,
+    pub browser: String,
+    pub visit_count: u32,
+    pub last_visited_at: String,
+    pub source_type: String,
+}
+
 pub struct TelemetryStorage {
     db_path: PathBuf,
     max_size_bytes: u64,
@@ -109,6 +120,33 @@ impl TelemetryStorage {
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_event_log_synced ON event_log_queue (synced, id);",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS browser_visit_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT NOT NULL,
+                page_title TEXT NOT NULL,
+                browser TEXT NOT NULL,
+                visit_count INTEGER NOT NULL DEFAULT 1,
+                last_visited_at TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'browser_history',
+                synced INTEGER NOT NULL DEFAULT 0
+            );",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_browser_visit_synced ON browser_visit_queue (synced, id);",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS browser_watermarks (
+                profile_key TEXT PRIMARY KEY,
+                last_visit_time INTEGER NOT NULL DEFAULT 0
+            );",
             [],
         )?;
 
@@ -330,6 +368,99 @@ impl TelemetryStorage {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    pub fn get_browser_watermark(&self, profile_key: &str) -> Result<i64> {
+        let conn = self.get_connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT last_visit_time FROM browser_watermarks WHERE profile_key = ?1;",
+        )?;
+        let res = stmt
+            .query_row(params![profile_key], |row| row.get::<_, i64>(0))
+            .unwrap_or(0);
+        Ok(res)
+    }
+
+    pub fn set_browser_watermark(&self, profile_key: &str, last_visit_time: i64) -> Result<()> {
+        let conn = self.get_connection()?;
+        conn.execute(
+            "INSERT INTO browser_watermarks (profile_key, last_visit_time)
+             VALUES (?1, ?2)
+             ON CONFLICT(profile_key) DO UPDATE SET last_visit_time = excluded.last_visit_time;",
+            params![profile_key, last_visit_time],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_browser_visits(&self, records: &[BrowserVisitRecord]) -> Result<usize> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+        self.enforce_fifo_capacity()?;
+        let mut conn = self.get_connection()?;
+        let tx = conn.transaction()?;
+        let mut count = 0usize;
+        for rec in records {
+            tx.execute(
+                "INSERT INTO browser_visit_queue (domain, page_title, browser, visit_count, last_visited_at, source_type, synced)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0);",
+                params![
+                    rec.domain,
+                    rec.page_title,
+                    rec.browser,
+                    rec.visit_count,
+                    rec.last_visited_at,
+                    rec.source_type,
+                ],
+            )?;
+            count += 1;
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
+    pub fn get_unsynced_browser_visits(&self, limit: usize) -> Result<Vec<BrowserVisitRecord>> {
+        let conn = self.get_connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, domain, page_title, browser, visit_count, last_visited_at, source_type
+             FROM browser_visit_queue
+             WHERE synced = 0
+             ORDER BY id ASC
+             LIMIT ?1;",
+        )?;
+
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(BrowserVisitRecord {
+                id: Some(row.get(0)?),
+                domain: row.get(1)?,
+                page_title: row.get(2)?,
+                browser: row.get(3)?,
+                visit_count: row.get(4)?,
+                last_visited_at: row.get(5)?,
+                source_type: row.get(6)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    pub fn delete_synced_browser_visits(&self, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.get_connection()?;
+        let tx = conn.transaction()?;
+        for chunk in ids.chunks(50) {
+            let id_list: Vec<String> = chunk.iter().map(|id| id.to_string()).collect();
+            let sql = format!("DELETE FROM browser_visit_queue WHERE id IN ({});", id_list.join(","));
+            tx.execute(&sql, [])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 }

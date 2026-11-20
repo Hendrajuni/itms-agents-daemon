@@ -2,15 +2,20 @@
 
 [![Rust Version](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org/)
 [![Target Platform](https://img.shields.io/badge/platform-Windows%20x86__64-blue.svg)](https://microsoft.com/windows)
-[![Release Version](https://img.shields.io/badge/release-v0.3.0-brightgreen.svg)](releases/v0.3.0/)
+[![Release Version](https://img.shields.io/badge/release-v0.4.0-brightgreen.svg)](releases/v0.4.0/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**ITMS Endpoint Agent Daemon** adalah background service Windows mandiri (*standalone single executable*) berbasis **Rust** yang dirancang untuk mengumpulkan telemetri aktivitas aplikasi, domain web, volume trafik data jaringan riil, pengawasan Windows Event Log keamanan & crash sistem, spesifikasi perangkat keras, dan audit inventaris software secara 100% presisi (*ground truth*), lalu menyinkronkannya ke server pusat **ITMS-Pro** (Django).
+**ITMS Endpoint Agent Daemon** adalah background service Windows mandiri (*standalone single executable*) berbasis **Rust** yang dirancang untuk mengumpulkan telemetri aktivitas aplikasi, riwayat kunjungan situs web asli (*Real Web History*), volume trafik data jaringan riil, pengawasan Windows Event Log keamanan & crash sistem, spesifikasi perangkat keras, dan audit inventaris software secara 100% presisi (*ground truth*), serta mendukung **OTA Auto-Update** otomatis via HTTPS port 443 ke server pusat **ITMS-Pro** (Django).
 
 ---
 
 ## 🌟 Fitur Utama
 
+* **🌐 Real Browser History Scanner (v0.4.0):** Modul `browser_history` yang secara periodik (tiap 2 menit) membaca database SQLite `History` milik **Google Chrome** & **Microsoft Edge** pada seluruh profil `C:\Users\*` (`Default` & `Profile *`) menggunakan *safe read-only temp copy* (tanpa mengunci browser yang sedang terbuka) dan *incremental watermark* lokal. Mengirimkan data kunjungan bersih (`browser_visits`: domain, judul halaman, nama browser, jumlah kunjungan, dan jam akses) ke ITMS-Pro.
+* **🔒 Enterprise Browser Policy Enforcer (v0.4.0):** Modul `browser_policy` yang secara otomatis menerapkan Windows Enterprise Registry Policy (`HKLM`) untuk Chrome & Edge: menonaktifkan **DNS-over-HTTPS (`DnsOverHttpsMode = "off"`)** agar seluruh DNS lookup melewati Windows DNS Client, serta menonaktifkan mode **Incognito / InPrivate**.
+* **🚀 Zero-Brick OTA Auto-Updater (v0.4.0):** Modul `updater` yang memungkinkan pembaruan binary agen secara otomatis dan aman lewat HTTPS port 443 tanpa intervensi manual di laptop karyawan (termasuk WFH):
+  * Cek manifest SemVer berkala ke `GET /network/api/agent/latest-release/` (mendukung mode rollout `canary` & `all`).
+  * Unduh binary ke `.new`, verifikasi integritas **SHA-256**, jalankan *smoke test* (`--version`), lakukan **Atomic Rename Swap** (`.exe` → `.old`, `.new` → `.exe` dengan rollback otomatis jika gagal), lalu restart service secara bersih dan hapus `.old` saat menyala kembali.
 * **🛡️ Windows EventLog Real-Time Push Ingestion (v0.3.0):** Modul background subscriber pengawas Windows Event Log (`eventlog_watcher`) yang berjalan murni secara *event-driven* (**0% CPU idle**) via Win32 `EvtSubscribe` (`EvtSubscribeToFutureEvents`).
   * **Insiden Keamanan (Security Channel):** Menangkap Brute-Force Logon Failed (Event 4625), User Account Created (4720), User Deleted (4726), dan Account Lockout (4740).
   * **Kesehatan Sistem & Stabilitas (System Channel):** Menangkap Service Crash (7034), Service Stopped (7036 dengan filter kebisingan), File System NTFS Corrupt (55), Volume Disk Corrupt (98), Planned Restart/Shutdown (1074), dan Kernel-Power Dirty Reboot / BSOD / Mati Lampu (41).
@@ -37,16 +42,16 @@
 ## 🚀 Panduan Instalasi Cepat
 
 ### 1. Unduh Berkas Rilis
-Unduh paket rilis terbaru di tab [**Releases**](https://github.com/Hendrajuni/itms-agents-daemon/releases/latest) atau gunakan folder [`releases/v0.3.0/`](releases/v0.3.0/) / [`releases/latest/`](releases/latest/).
+Unduh paket rilis terbaru di tab [**Releases**](https://github.com/Hendrajuni/itms-agents-daemon/releases/latest) atau gunakan folder [`releases/v0.4.0/`](releases/v0.4.0/) / [`releases/latest/`](releases/latest/).
 
 ### 2. Konfigurasi `agent.toml`
 Salin template `agent.toml.example` menjadi `agent.toml` pada folder instalasi atau ke `%PROGRAMDATA%\ITMS\agent.toml`:
 ```toml
 [server]
 # Gunakan domain publik atau IP VPS ITMS
-url = "https://itms.pmgcloud.my.id/network/api/telemetry/push/"
-# Sesuaikan dengan AGENT_SECRET_KEY pada file .env server ITMS
-agent_key = "django-insecure-itms-pmgcloud-2026-safe-key"
+url = "https://itms.domain-anda.com/network/api/telemetry/push/"
+# Sesuaikan dengan ITMS_AGENT_SECRET_KEY pada file .env server ITMS
+agent_key = "GANTI_DENGAN_AGENT_SECRET_KEY_ANDA"
 flusher_interval_secs = 60
 batch_size = 100
 request_timeout_secs = 15
@@ -67,6 +72,14 @@ level = "info"
 # override_ip = "192.168.1.155"
 # override_mac = "D0:39:57:7C:BB:67"
 # override_hostname = "DESKTOP-SM73UFF"
+
+[policy]
+enforce_browser_policy = true
+browser_history_interval_secs = 120
+
+[updater]
+enabled = true
+check_interval_secs = 3600
 ```
 
 ### 3. Jalankan Agent
@@ -94,22 +107,25 @@ Tekan `Ctrl + C` untuk keluar secara aman.
 itms-agents-daemon/
 ├── config/                     # Template konfigurasi agent (agent.toml.example)
 ├── releases/                   # Bundel rilis binary & script instalasi
-│   ├── v0.3.0/                 # Arsip rilis v0.3.0 (ZIP, EXE, batch scripts, checksum)
-│   └── latest/                 # Salinan rilis terbaru (v0.3.0)
+│   ├── v0.4.0/                 # Arsip rilis v0.4.0 (ZIP, EXE, batch scripts, checksum)
+│   └── latest/                 # Salinan rilis terbaru (v0.4.0)
 ├── src/                        # Kode sumber Rust
+│   ├── browser_history.rs      # Safe Chrome/Edge SQLite History scanner & watermark
+│   ├── browser_policy.rs       # HKLM Enterprise Browser Policy enforcer (DoH=off, no Incognito)
 │   ├── classifier.rs           # Domain normalizer & FQDN classifier
-│   ├── config.rs               # TOML configuration loader & device overrides
+│   ├── config.rs               # TOML configuration loader, policy & updater settings
 │   ├── dns_etw.rs              # Event Tracing for Windows DNS sniffer
 │   ├── eventlog_watcher.rs     # Windows EventLog push-subscriber (Security & System)
-│   ├── flusher.rs              # HTTP batch flusher, 2-way command queue & log flusher
+│   ├── flusher.rs              # HTTP batch flusher (activities, browser_visits & event logs)
 │   ├── hardware.rs             # Endpoint identity (IP Helper API MAC & UUID) & system metrics
 │   ├── main.rs                 # CLI entry point & worker coordinator
 │   ├── net_etw.rs              # Kernel TCPIP event stream accounting (ETW)
 │   ├── service.rs              # Windows Service Control Manager wrapper
 │   ├── software.rs             # Windows Registry software audit scanner
 │   ├── spec.rs                 # Hardware & OS specification extractor
-│   ├── storage.rs              # SQLite FIFO queue & offline storage
+│   ├── storage.rs              # SQLite FIFO queue, browser visits queue & watermarks
 │   ├── traffic.rs              # Network traffic & DNS resolution aggregator
+│   ├── updater.rs              # Zero-Brick OTA Auto-Updater (SHA-256 + smoke test + atomic swap)
 │   └── window_tracker.rs       # Foreground window title & user idle tracker
 ├── Cargo.toml                  # Rust dependencies & LTO profile configuration
 └── README.md                   # Dokumentasi repositori

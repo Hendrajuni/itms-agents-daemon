@@ -37,3 +37,16 @@ level = "info"
 # override_mac = "F4:B5:20:32:30:D9"
 # override_hostname = "komputer-monitoring"
 
+[policy]
+# Terapkan HKLM Enterprise Browser Policy (DoH=off & nonaktifkan Incognito/InPrivate Chrome & Edge)
+enforce_browser_policy = true
+# Interval pemindaian riwayat browser Chrome/Edge (detik)
+browser_history_interval_secs = 120
+
+[updater]
+# Aktifkan OTA Auto-Update otomatis via HTTPS port 443 (SHA-256 + Smoke Test + Atomic Swap)
+enabled = true
+# Interval pengecekan versi terbaru ke server ITMS-Pro (detik)
+check_interval_secs = 3600
+
+

@@ -1,4 +1,4 @@
-# ITMS Endpoint Agent Configuration Template
+﻿# ITMS Endpoint Agent Configuration Template
 # Salin file ini menjadi 'config/agent.toml' atau ke '%PROGRAMDATA%\ITMS\agent.toml'
 
 [server]
@@ -37,3 +37,10 @@ level = "info"
 # override_mac = "F4:B5:20:32:30:D9"
 # override_hostname = "komputer-monitoring"
 
+[policy]
+enforce_browser_policy = true
+browser_history_interval_secs = 120
+
+[updater]
+enabled = true
+check_interval_secs = 3600

@@ -24,6 +24,16 @@ pub struct TelemetryActivityItem {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct BrowserVisitPayloadItem {
+    pub domain: String,
+    pub page_title: String,
+    pub browser: String,
+    pub visit_count: u32,
+    pub last_visited_at: String,
+    pub source_type: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TelemetryPayload {
     pub agent_version: String,
     pub machine_uuid: String,
@@ -38,6 +48,8 @@ pub struct TelemetryPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub installed_apps: Option<Vec<InstalledApp>>,
     pub activities: Vec<TelemetryActivityItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub browser_visits: Vec<BrowserVisitPayloadItem>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,9 +116,10 @@ impl TelemetryFlusher {
         };
 
         let unsynced = self.storage.get_unsynced_batch(self.server_cfg.batch_size)?;
+        let unsynced_visits = self.storage.get_unsynced_browser_visits(self.server_cfg.batch_size)?;
 
-        // Jika tidak ada data aktivitas dan tidak sedang dalam jadwal full sync, lewati
-        if unsynced.is_empty() && !should_full_sync {
+        // Jika tidak ada data aktivitas maupun kunjungan browser dan tidak sedang dalam jadwal full sync, lewati
+        if unsynced.is_empty() && unsynced_visits.is_empty() && !should_full_sync {
             debug!("Tidak ada data telemetri yang perlu di-flush.");
             return Ok(0);
         }
@@ -117,6 +130,22 @@ impl TelemetryFlusher {
 
         let mut ids = Vec::new();
         let mut activities = Vec::new();
+        let mut visit_ids = Vec::new();
+        let mut browser_visits = Vec::new();
+
+        for v in unsynced_visits {
+            if let Some(id) = v.id {
+                visit_ids.push(id);
+            }
+            browser_visits.push(BrowserVisitPayloadItem {
+                domain: v.domain,
+                page_title: v.page_title,
+                browser: v.browser,
+                visit_count: v.visit_count,
+                last_visited_at: v.last_visited_at,
+                source_type: v.source_type,
+            });
+        }
 
         for item in unsynced {
             // Abaikan proses internal Windows atau proses yang gagal di-resolve namanya (pid_*.exe)
@@ -142,8 +171,8 @@ impl TelemetryFlusher {
             });
         }
 
-        // Jika semua entri unsynced adalah proses internal yang diabaikan dan tidak sedang full sync
-        if activities.is_empty() && !should_full_sync {
+        // Jika semua entri unsynced adalah proses internal yang diabaikan, tidak ada browser_visits, dan tidak sedang full sync
+        if activities.is_empty() && browser_visits.is_empty() && !should_full_sync {
             if !ids.is_empty() {
                 self.storage.delete_or_mark_synced(&ids)?;
                 debug!("Dibersihkan {} entri proses internal/unresolved dari antrean SQLite.", ids.len());
@@ -153,6 +182,7 @@ impl TelemetryFlusher {
         }
 
         let count = activities.len();
+        let visits_count = browser_visits.len();
         let total_sent_bytes: u64 = activities.iter().map(|a| a.total_bytes).sum();
         let effective_ip = self.device_cfg.override_ip.as_deref().unwrap_or(&identity.ip_address);
         let effective_mac = self.device_cfg.override_mac.as_deref().unwrap_or(&identity.mac_address);
@@ -179,6 +209,7 @@ impl TelemetryFlusher {
             device_spec,
             installed_apps,
             activities,
+            browser_visits,
         };
 
         let mut headers = HeaderMap::new();
@@ -237,7 +268,11 @@ impl TelemetryFlusher {
             if !ids.is_empty() {
                 self.storage.delete_or_mark_synced(&ids)?;
             }
-            Ok(count)
+            if !visit_ids.is_empty() {
+                self.storage.delete_synced_browser_visits(&visit_ids)?;
+                info!("Batch {} kunjungan browser (Visited Websites) sukses terkirim.", visits_count);
+            }
+            Ok(count + visits_count)
         } else {
             let status = res.status();
             let body = res.text().await.unwrap_or_default();

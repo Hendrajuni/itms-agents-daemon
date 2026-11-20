@@ -1,3 +1,5 @@
+mod browser_history;
+mod browser_policy;
 mod classifier;
 mod config;
 mod dns_etw;
@@ -10,8 +12,10 @@ mod software;
 mod spec;
 mod storage;
 pub mod traffic;
+mod updater;
 mod window_tracker;
 
+use browser_history::BrowserHistoryScanner;
 use classifier::is_ignored_network_process_or_domain;
 use chrono::Utc;
 use config::AgentConfig;
@@ -22,6 +26,7 @@ use hardware::HardwareCollector;
 use net_etw::NetEtwConsumer;
 use storage::{ActivityRecord, EventLogRecord, TelemetryStorage};
 use traffic::{DnsResolutionCache, TrafficAggregator};
+use updater::OtaUpdater;
 use window_tracker::WindowTracker;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,8 +105,16 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
     info!("=======================================================");
     info!("  ITMS Endpoint Agent Daemon v{}", env!("CARGO_PKG_VERSION"));
     info!("=======================================================");
+    // Bersihkan sisa binary `.old` setelah OTA update sebelumnya (jika ada)
+    updater::cleanup_old_binaries();
+
     let cfg = AgentConfig::load_or_default();
     info!("Konfigurasi berhasil dimuat. Target server: {}", cfg.server.url);
+
+    // Terapkan Enterprise Browser Policy (HKLM: DoH=off, disable Incognito/InPrivate Chrome & Edge)
+    if cfg.policy.enforce_browser_policy {
+        browser_policy::enforce_enterprise_browser_policies();
+    }
 
     let storage = match TelemetryStorage::new(&cfg.storage.db_path, cfg.storage.max_db_size_mb) {
         Ok(s) => Arc::new(s),
@@ -281,12 +294,45 @@ pub async fn run_daemon_loops(stop_signal: Arc<AtomicBool>) {
         info!("HTTP Batch Flusher loop dihentikan.");
     });
 
+    // 7. Jalankan Real Browser History Scanner (Chrome & Edge SQLite -> browser_visits)
+    let browser_scanner = BrowserHistoryScanner::new(
+        storage.clone(),
+        cfg.policy.browser_history_interval_secs,
+    );
+    let stop_browser = stop_signal.clone();
+    let browser_handle = tokio::spawn(async move {
+        browser_scanner.run(stop_browser).await;
+    });
+
+    // 8. Jalankan OTA Auto-Updater (Zero-Brick SHA-256 + Atomic Swap)
+    let updater_enabled = cfg.updater.enabled;
+    let updater_worker = OtaUpdater::new(
+        cfg.server.clone(),
+        identity.machine_uuid.clone(),
+        cfg.updater.check_interval_secs,
+    );
+    let stop_updater = stop_signal.clone();
+    let updater_handle = tokio::spawn(async move {
+        if updater_enabled {
+            updater_worker.run(stop_updater).await;
+        }
+    });
+
     // Tunggu hingga sinyal stop aktif
     while !stop_signal.load(Ordering::Relaxed) {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     info!("Menunggu seluruh worker tasks selesai menyimpan data...");
-    let _ = tokio::join!(tracker_handle, dns_handle, net_handle, bg_handle, eventlog_handle, flusher_handle);
+    let _ = tokio::join!(
+        tracker_handle,
+        dns_handle,
+        net_handle,
+        bg_handle,
+        eventlog_handle,
+        flusher_handle,
+        browser_handle,
+        updater_handle
+    );
     info!("ITMS Endpoint Agent Daemon sukses dimatikan.");
 }
